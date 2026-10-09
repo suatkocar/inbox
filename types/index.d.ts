@@ -198,7 +198,8 @@ export type Check = {
   repo: string | null
   /**
    * Files it reads changed after it ran: any file for a lint, a validation or
-   * a check script, and a file other than Markdown for the rest.
+   * a check script, doctest, or an explicitly classified command; a file
+   * other than Markdown for the rest.
    */
   isStale: boolean
   /** The piece of Claude's command that ran it, as written, such as `npm test > t.log`. */

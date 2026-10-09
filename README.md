@@ -22,6 +22,17 @@ that session.
 To update, run `claude plugin update inbox`, then `/reload-plugins` in any
 session that's already open.
 
+For a local checkout with your own changes, register its directory and install
+at user scope. Claude Code then loads that checkout across your local projects:
+
+```sh
+claude plugin marketplace add /absolute/path/to/inbox --scope user
+claude plugin install inbox@inbox --scope user
+```
+
+Run `/reload-plugins` in existing sessions after installation. Keep local
+changes committed before bringing in upstream updates.
+
 ## Using it
 
 A line above your prompt shows what the session is working on and how many
@@ -53,6 +64,29 @@ Claude runs each test or build as a command of its own, so the mod knows
 exactly how it ended. If Claude says something passes when the last run
 failed, or hasn't run since an edit, the mod asks Claude to run it again or
 say the change is untested.
+
+Python's built-in `python -m unittest` and `python -m doctest` commands are
+recognized, including versioned executables such as `python3.14`. A Markdown
+edit makes a previous doctest result stale, since the document can contain the
+tested examples.
+
+For a check that is not recognized automatically, Claude can supply an explicit
+category to `mcp__inbox__run_check`:
+
+```json
+{ "checks": ["mvn test"], "kind": "tests" }
+```
+
+The categories are `tests`, `types`, `lint`, `build`, and `validate`.
+`kind` applies only to unrecognized commands; recognized commands keep their
+detected category. These commands still use Bash's permission checks, run one
+at a time without pipes or redirects, and have their output and result saved.
+Each distinct custom command has a separate result, and Markdown edits make
+its result stale because Inbox cannot know all of its inputs.
+
+Automatic observation of direct Bash calls still requires a recognized command.
+If an unknown command has no explicit category, `run_check` explains how to add
+one and warns that running it directly in Bash leaves its result untracked.
 
 To see every part with sample items, run `/inbox demo`. Run it again to go
 back to your own.

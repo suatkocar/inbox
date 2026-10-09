@@ -8,6 +8,9 @@ import type { Check, CheckKind, Target } from '../types'
 /** One recognized check inside a command, such as `bun test` or `tsc`. */
 export type CheckCall = { name: string; kind: CheckKind }
 
+/** A caller may classify a command, but cannot declare that it covers every other check. */
+export type DeclaredCheckKind = Exclude<CheckKind, 'all'>
+
 /** A package manager's options before its script, such as `--prefix app` or `-w pkg`. */
 const PM_OPTIONS = String.raw`(?:-{1,2}[\w-]+(?:=\S+|\s+(?!-|(?:run|test|build|lint)\b)\S+)?\s+)*`
 /** A script such as `test` or `lint:css`; the match's group 2 is its `:css` part, so `lint` and `lint:css` are different checks. */
@@ -19,6 +22,11 @@ const CHECKS: { kind: CheckKind; pattern: RegExp; name: (m: RegExpMatchArray) =>
   { kind: 'validate', pattern: /\bclaude\s+plugin\s+validate\b/, name: () => 'plugin validate' },
   { kind: 'tests', pattern: pm('bun|npm|pnpm|yarn|deno', 'test'), name: m => `${m[1]} test${m[2] ?? ''}` },
   { kind: 'tests', pattern: /\bnode\s+(?:-{1,2}[\w-]+(?:=\S+)?\s+)*--test\b/, name: () => 'node --test' },
+  {
+    kind: 'tests',
+    pattern: /\bpython(?:\d+(?:\.\d+)*)?\s+-m\s+(unittest|doctest)\b/,
+    name: m => m[1] ?? 'Python tests',
+  },
   { kind: 'tests', pattern: /\b(vitest|jest|pytest|rspec|mocha|phpunit|ava|tap)\b/, name: m => m[1] ?? 'tests' },
   { kind: 'tests', pattern: /\b(go|cargo|swift|mix|dotnet)\s+test\b/, name: m => `${m[1]} test` },
   { kind: 'tests', pattern: /\bplaywright\s+test\b/, name: () => 'playwright' },
@@ -265,7 +273,7 @@ export type CheckRun = {
  * or `npm --prefix <folder> test`. The folder is null when the command hides
  * it, as with a variable other than HOME or `$(...)`.
  */
-export function checkRun(command: string, cwd: string, home: string): CheckRun | null {
+export function checkRun(command: string, cwd: string, home: string, kind?: DeclaredCheckKind): CheckRun | null {
   const dir = resolvePath('/', cwd)
   const expand = (word: string): string | null => {
     if (/\$\(|`/.test(word)) return null
@@ -324,7 +332,12 @@ export function checkRun(command: string, cwd: string, home: string): CheckRun |
     return { call, target, command: segment, folder }
   }
 
-  return null
+  // Only run_check declares a kind, after checking the single-command rule.
+  // Keep the complete command as its identity: an unknown runner's flags may
+  // change the suite, so a different invocation must not clear its failure.
+  return kind && command.trim()
+    ? { call: { name: command.trim(), kind }, target: NO_TARGET, command, folder: dir }
+    : null
 }
 
 /** Whether a folder is a temporary one, where a throwaway copy of a project lives. */

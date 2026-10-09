@@ -39,7 +39,7 @@ import {
   readResult,
   resolvePath,
 } from './checks'
-import type { Contradiction } from './checks'
+import type { CheckRun, Contradiction, DeclaredCheckKind } from './checks'
 import {
   NO_CHECKS,
   addRepo,
@@ -195,7 +195,8 @@ The answer to a question is the user's to give. Close a question with their answ
 const CLOSE_TOOL = 'mcp__inbox__close'
 
 const RUN_CHECK_TOOL = 'mcp__inbox__run_check'
-const RUN_CHECK_DESCRIPTION = `Run tests, type checks, lints, builds and validation scripts with this tool, not with Bash. Each command is one check, such as "npm test", "npx vitest run src/a.test.ts" or "tsc --noEmit", with no pipe, redirect or other command. They run in order in the shell's current folder; to check another folder, cd there with Bash first. Each check's full output goes to a log file, and you get back whether it passed, its summary, the lines that name what failed, and the log's path.`
+const RUN_CHECK_DESCRIPTION = `Run tests, type checks, lints, builds and validation scripts with this tool, not with Bash. Each command is one check, such as "npm test", "python3 -m unittest -v", "python3 -m doctest -v README.md" or "tsc --noEmit", with no pipe, redirect or other command. For commands not recognized automatically, set kind to tests, types, lint, build or validate; they will run and be tracked too. Recognized commands keep their detected kind. They run in order in the shell's current folder; to check another folder, cd there with Bash first. Each check's full output goes to a log file, and you get back whether it passed, its summary, the lines that name what failed, and the log's path.`
+const RUN_CHECK_KINDS: DeclaredCheckKind[] = ['tests', 'types', 'lint', 'build', 'validate']
 const RUN_CHECK_SCHEMA = {
   type: 'object',
   properties: {
@@ -203,6 +204,12 @@ const RUN_CHECK_SCHEMA = {
       type: 'array',
       items: { type: 'string' },
       description: 'The check commands to run, in order, one check each.',
+    },
+    kind: {
+      type: 'string',
+      enum: RUN_CHECK_KINDS,
+      description:
+        'The category for commands not recognized automatically. Recognized commands keep their detected kind.',
     },
   },
   required: ['checks'],
@@ -1694,11 +1701,12 @@ function refreshTree($: EngineInterface, repos?: string[]): Promise<void> {
 }
 
 /** Shell syntax that would make a check command more than the one check. */
-const SHELL_SYNTAX = /[|;&<>`]|\$\(/
+const SHELL_SYNTAX = /[|;&<>`\r\n]|\$\(/
 
 /** Whether a command is one check and nothing else, so its exit status is the check's. */
-function isLoneCheck(command: string): boolean {
-  return checksIn(command).length === 1 && !SHELL_SYNTAX.test(command)
+function isLoneCheck(command: string, allowUnrecognized = false): boolean {
+  const count = checksIn(command).length
+  return !!command.trim() && (count === 1 || (allowUnrecognized && count === 0)) && !SHELL_SYNTAX.test(command)
 }
 
 let checkLogFolder: Promise<string> | null = null
@@ -1732,19 +1740,25 @@ function checkLogs($: EngineInterface): Promise<string> {
  * returns what Claude reads: how it ended, its summary, the lines that name
  * what failed, a failed run's last lines, and the log's path.
  */
-async function runChecks($: EngineInterface, checks: string[]): Promise<string> {
+async function runChecks($: EngineInterface, checks: string[], kind?: DeclaredCheckKind): Promise<string> {
   if (checks.length === 0) return 'Pass at least one check command in "checks".'
   const logFolder = await checkLogs($)
   const lines: string[] = []
   for (const command of checks) {
-    const [call] = checksIn(command)
-    if (!call || !isLoneCheck(command)) {
+    if (!isLoneCheck(command, true)) {
       lines.push(`${command}: not run. Pass one check per command, with no pipe, redirect or other command.`)
       continue
     }
     const cwd = await $.session.cwd()
+    const run = checkRun(command, cwd, home, kind)
+    if (!run) {
+      lines.push(
+        `${command}: not run. This command is not recognized as a check. Set kind to tests, types, lint, build or validate to run and track it. If you run it directly in Bash, Inbox will not track its result.`,
+      )
+      continue
+    }
     const ran = await $.tool
-      .call({ tool: 'Bash', command, description: `Run ${call.name}` })
+      .call({ tool: 'Bash', command, description: `Run ${run.call.name}` })
       .catch((err: unknown) => ({ deny: String(err) }))
     if (typeof ran.deny === 'string') {
       // In auto mode the classifier cannot decide a call a plugin makes, but it can decide Claude's own Bash call.
@@ -1762,7 +1776,7 @@ async function runChecks($: EngineInterface, checks: string[]): Promise<string> 
     }
     const output = ran.text ?? ''
     const isFailed = ran.isError === true
-    await recordCheck($, command, cwd, output, isFailed)
+    await recordCheck($, command, cwd, output, isFailed, run)
     const { summary } = readResult(output, isFailed)
     const exit = output.match(/^Exit code (\d+)/)?.[1]
     // Each command keeps only its latest log.
@@ -1794,8 +1808,15 @@ async function runChecks($: EngineInterface, checks: string[]): Promise<string> 
 }
 
 /** Records how a single check ended, and in which folder; `cwd` is where the shell started. */
-async function recordCheck($: EngineInterface, command: string, cwd: string, output: string, isError: boolean) {
-  const run = checkRun(command, cwd, home)
+async function recordCheck(
+  $: EngineInterface,
+  command: string,
+  cwd: string,
+  output: string,
+  isError: boolean,
+  resolved?: CheckRun,
+) {
+  const run = resolved ?? checkRun(command, cwd, home)
   if (!run) return
   // A folder the command hides is taken as the session's.
   const folder = run.folder ?? root
@@ -2088,8 +2109,11 @@ export const register: Register = on => {
     // The checks run in the main conversation's shell, so a subagent in a worktree of its own would check the wrong folder.
     if (input.agentId) return { result: SUBAGENT_CHECK_REFUSAL }
     const checks = Array.isArray(input.checks) ? input.checks.filter((c): c is string => typeof c === 'string') : []
+    if (input.kind !== undefined && !RUN_CHECK_KINDS.includes(input.kind as DeclaredCheckKind)) {
+      return { result: 'Not run: kind must be tests, types, lint, build or validate.' }
+    }
 
-    return { result: await runChecks($, checks) }
+    return { result: await runChecks($, checks, input.kind as DeclaredCheckKind | undefined) }
   })
 
   on('tool.call', async ($, e, next) => {

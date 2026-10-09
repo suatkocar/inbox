@@ -17,6 +17,11 @@ var CHECKS = [
   { kind: "validate", pattern: /\bclaude\s+plugin\s+validate\b/, name: () => "plugin validate" },
   { kind: "tests", pattern: pm("bun|npm|pnpm|yarn|deno", "test"), name: (m) => `${m[1]} test${m[2] ?? ""}` },
   { kind: "tests", pattern: /\bnode\s+(?:-{1,2}[\w-]+(?:=\S+)?\s+)*--test\b/, name: () => "node --test" },
+  {
+    kind: "tests",
+    pattern: /\bpython(?:\d+(?:\.\d+)*)?\s+-m\s+(unittest|doctest)\b/,
+    name: (m) => m[1] ?? "Python tests"
+  },
   { kind: "tests", pattern: /\b(vitest|jest|pytest|rspec|mocha|phpunit|ava|tap)\b/, name: (m) => m[1] ?? "tests" },
   { kind: "tests", pattern: /\b(go|cargo|swift|mix|dotnet)\s+test\b/, name: (m) => `${m[1]} test` },
   { kind: "tests", pattern: /\bplaywright\s+test\b/, name: () => "playwright" },

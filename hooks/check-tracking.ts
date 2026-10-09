@@ -3,7 +3,7 @@
 // the Stop hook read from the results. Pure functions; the I/O stays in register.tsx.
 
 import type { Check, CheckKind, Checks, Target } from '../types'
-import { checkName, claimsIn, isTemporary, targetOfCommand } from './checks'
+import { checkName, checksIn, claimsIn, isTemporary, targetOfCommand } from './checks'
 import type { Contradiction } from './checks'
 
 export const NO_CHECKS: Checks = { results: [], repos: [] }
@@ -94,9 +94,14 @@ export function recorded(checks: Checks, runs: Run[], at: number, root: string):
   }
 }
 
-/** Whether a result of this kind reads the file at `path`: Markdown matters only to a lint, a validation or a check script. */
-function readsFile(kind: CheckKind, path: string): boolean {
-  return ['lint', 'validate', 'all'].includes(kind) || !/\.md$/i.test(path)
+/** Doctest reads documents; an explicitly classified command's inputs are unknown, so Markdown counts too. */
+function readsFile(check: Check, path: string): boolean {
+  return (
+    ['lint', 'validate', 'all'].includes(check.kind) ||
+    !/\.md$/i.test(path) ||
+    check.name === 'doctest' ||
+    checksIn(check.command).length === 0
+  )
 }
 
 /**
@@ -113,7 +118,7 @@ export function changed(checks: Checks, repo: string, paths: string[] | null, ro
     return paths.some(p => {
       const path = `${repo}/${p}`
 
-      return readsFile(c.kind, p) && (path === folder || path.startsWith(`${folder}/`))
+      return readsFile(c, p) && (path === folder || path.startsWith(`${folder}/`))
     })
   }
 

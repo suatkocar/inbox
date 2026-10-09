@@ -5,6 +5,14 @@ import { checkName, checkRun, checksIn, claimsIn, failureLines, failureList, rea
 import { candidates, changedPaths, readChanged, readLsTree } from '../hooks/git'
 
 describe('checksIn', () => {
+  test('recognizes Python built-in tests with versioned and absolute executables', () => {
+    for (const python of ['python', 'python3', '/opt/python3.14', '.venv/bin/python']) {
+      expect(checksIn(`${python} -m unittest -v`)).toEqual([{ name: 'unittest', kind: 'tests' }])
+      expect(checksIn(`${python} -m doctest -v README.md`)).toEqual([{ name: 'doctest', kind: 'tests' }])
+    }
+    expect(checksIn('echo "python3 -m unittest"')).toEqual([])
+  })
+
   test('finds each check in a compound command, once', () => {
     const command =
       'cd mods/x && claude plugin test . > t.log 2>&1; echo "test exit $?"; npx -y -p typescript tsc --noEmit -p . > c.log 2>&1; echo "tsc exit $?"'
@@ -41,6 +49,30 @@ describe('checksIn', () => {
 describe('checkRun', () => {
   const run = (command: string) => checkRun(command, '/work/repo', '/home/me')
   const folder = (command: string) => run(command)?.folder
+
+  test('keeps Python file targets separate from output flags', () => {
+    expect(run('python3 -m doctest -v README.md')?.target).toEqual({
+      paths: ['/work/repo/README.md'],
+      filters: [],
+    })
+    expect(run('.venv/bin/python -m unittest -v tests/test_math.py')?.target).toEqual({
+      paths: ['/work/repo/tests/test_math.py'],
+      filters: [],
+    })
+  })
+
+  test('tracks unrecognized checks only when their kind is explicitly declared', () => {
+    expect(run('mvn test')).toBe(null)
+    const declared = checkRun('mvn test', '/work/repo', '/home/me', 'tests')
+    expect(declared).toEqual({
+      call: { name: 'mvn test', kind: 'tests' },
+      target: { paths: [], filters: [] },
+      command: 'mvn test',
+      folder: '/work/repo',
+    })
+    expect(checkRun('gradle test', '/work/repo', '/home/me', 'tests')?.call.name).not.toBe(declared?.call.name)
+    expect(checkRun('npm test', '/work/repo', '/home/me', 'build')?.call.kind).toBe('tests')
+  })
 
   test('runs in the shell’s folder, or the one the check names', () => {
     expect(folder('npm test')).toBe('/work/repo')

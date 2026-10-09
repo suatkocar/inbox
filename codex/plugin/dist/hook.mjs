@@ -17,6 +17,11 @@ var CHECKS = [
   { kind: "validate", pattern: /\bclaude\s+plugin\s+validate\b/, name: () => "plugin validate" },
   { kind: "tests", pattern: pm("bun|npm|pnpm|yarn|deno", "test"), name: (m) => `${m[1]} test${m[2] ?? ""}` },
   { kind: "tests", pattern: /\bnode\s+(?:-{1,2}[\w-]+(?:=\S+)?\s+)*--test\b/, name: () => "node --test" },
+  {
+    kind: "tests",
+    pattern: /\bpython(?:\d+(?:\.\d+)*)?\s+-m\s+(unittest|doctest)\b/,
+    name: (m) => m[1] ?? "Python tests"
+  },
   { kind: "tests", pattern: /\b(vitest|jest|pytest|rspec|mocha|phpunit|ava|tap)\b/, name: (m) => m[1] ?? "tests" },
   { kind: "tests", pattern: /\b(go|cargo|swift|mix|dotnet)\s+test\b/, name: (m) => `${m[1]} test` },
   { kind: "tests", pattern: /\bplaywright\s+test\b/, name: () => "playwright" },
@@ -109,6 +114,7 @@ function resolvePath(from, path) {
   }
   return `/${parts.join("/")}`;
 }
+var NO_TARGET = { paths: [], filters: [] };
 var OUTPUT_FLAGS = /* @__PURE__ */ new Set([
   "--reporter",
   "--verbose",
@@ -180,7 +186,7 @@ function readTarget(words2, runner, folder, resolve) {
   }
   return { paths, filters };
 }
-function checkRun(command, cwd, home) {
+function checkRun(command, cwd, home, kind) {
   const dir = resolvePath("/", cwd);
   const expand = (word) => {
     if (/\$\(|`/.test(word)) return null;
@@ -232,7 +238,7 @@ function checkRun(command, cwd, home) {
     );
     return { call, target, command: segment, folder };
   }
-  return null;
+  return kind && command.trim() ? { call: { name: command.trim(), kind }, target: NO_TARGET, command, folder: dir } : null;
 }
 function isTemporary(folder) {
   return /^(?:\/private)?\/(?:tmp|var\/tmp|var\/folders)(?:\/|$)/.test(folder);
@@ -370,8 +376,8 @@ function recorded(checks, runs, at, root) {
     )
   };
 }
-function readsFile(kind, path) {
-  return ["lint", "validate", "all"].includes(kind) || !/\.md$/i.test(path);
+function readsFile(check, path) {
+  return ["lint", "validate", "all"].includes(check.kind) || !/\.md$/i.test(path) || check.name === "doctest" || checksIn(check.command).length === 0;
 }
 function changed(checks, repo, paths, root) {
   if (paths !== null && paths.length === 0) return checks;
@@ -380,7 +386,7 @@ function changed(checks, repo, paths, root) {
     const folder = c.folder ?? root;
     return paths.some((p) => {
       const path = `${repo}/${p}`;
-      return readsFile(c.kind, p) && (path === folder || path.startsWith(`${folder}/`));
+      return readsFile(c, p) && (path === folder || path.startsWith(`${folder}/`));
     });
   };
   return {

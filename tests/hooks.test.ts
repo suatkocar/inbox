@@ -929,6 +929,72 @@ test("run_check does not run a command with a pipe or two checks, or a subagent'
   expect(toolCalls).toEqual([])
 })
 
+test('run_check explains an unknown command without inventing a pipe error', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [])
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  const unknown = await $.tool.call({ tool: RUN_CHECK, checks: ['mvn test'] } as never)
+  expect(String(unknown.result)).toContain('not recognized')
+  expect(String(unknown.result)).toContain('kind')
+  expect(String(unknown.result)).not.toContain('pipe')
+  expect(toolCalls).toEqual([])
+})
+
+test('run_check tracks explicitly classified checks without clearing another command', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [])
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  toolAnswer = { text: 'Exit code 1\n 1 fail\n', isError: true }
+  const failed = await $.tool.call({ tool: RUN_CHECK, checks: ['mvn test'], kind: 'tests' } as never)
+  expect(String(failed.result)).toContain('mvn test: failed with exit 1')
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  expect(await band.find({ text: /✗ mvn test/ })).toBeDefined()
+
+  toolAnswer = { text: ' 1 pass\n', isError: false }
+  await $.tool.call({ tool: RUN_CHECK, checks: ['gradle test'], kind: 'tests' } as never)
+  expect(await band.find({ text: /✗ mvn test/ })).toBeDefined()
+  await $.tool.call({ tool: RUN_CHECK, checks: ['mvn test'], kind: 'tests' } as never)
+  expect(await band.find({ text: /✗ mvn test/ })).toBeUndefined()
+  expect(toolCalls).toEqual(['mvn test', 'gradle test', 'mvn test'])
+})
+
+test('an explicit kind cannot bypass the single-command rule or invent a category', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [])
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  const invalid = await $.tool.call({ tool: RUN_CHECK, checks: ['mvn test'], kind: 'all' } as never)
+  expect(String(invalid.result)).toContain('kind')
+  for (const command of [
+    'mvn test | tail -5',
+    'mvn test && echo done',
+    'mvn test > result.log',
+    'mvn test; gradle test',
+    'mvn test\ntrue',
+    'mvn test\rtrue',
+    '',
+  ]) {
+    const refused = await $.tool.call({ tool: RUN_CHECK, checks: [command], kind: 'tests' } as never)
+    expect(String(refused.result)).toContain('one check per command')
+  }
+  expect(toolCalls).toEqual([])
+})
+
+test('built-in Python tests run through run_check and failures run in Bash are tracked', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [])
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  toolAnswer = { text: 'Ran 6 tests\nOK\n', isError: false }
+  const passed = await $.tool.call({ tool: RUN_CHECK, checks: ['python3 -m unittest -v'] } as never)
+  expect(String(passed.result)).toContain('python3 -m unittest -v: passed')
+  const documented = await $.tool.call({ tool: RUN_CHECK, checks: ['python3 -m doctest -v README.md'] } as never)
+  expect(String(documented.result)).toContain('python3 -m doctest -v README.md: passed')
+  toolAnswer = { text: 'Exit code 1\nFAILED (failures=1)\n', isError: true }
+  await $.tool.call({ tool: 'Bash', command: 'python3 -m unittest -v', description: 'Run tests' } as never)
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  expect(await band.find({ text: /✗ unittest/ })).toBeDefined()
+  expect(toolCalls).toEqual(['python3 -m unittest -v', 'python3 -m doctest -v README.md', 'python3 -m unittest -v'])
+})
+
 test('a lone check Claude runs in Bash is recorded, and one with a pipe is refused', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   world(on, [])
