@@ -288,6 +288,8 @@ declare module 'claude-code' {
       suggestions: Suggestions
       presence: Presence
       previous: Previous | null
+      /** The terminal summary is opt-in and resets for each conversation load. */
+      isSummaryOpen: boolean
       tab: Tab
       prViews: PrViews
       /** The PR checks the person pressed Fix on, by their row's id. */

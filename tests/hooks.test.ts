@@ -196,7 +196,46 @@ function world(
   })
 }
 
-test('the session card preserves another plugin below it while working and at rest', async ($, on) => {
+test('an empty terminal Inbox is dim, still opens, and has no empty summary', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [])
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  expect((await band.find({ key: 'inbox-open' }))?.props.variant).toBe('secondary')
+  expect((await band.find({ key: 'inbox-open' }))?.props.dimColor).toBe(true)
+  expect(await band.find({ text: /^MODS$/ })).toBeDefined()
+  expect(await band.find({ key: 'inbox-summary' })).toBeUndefined()
+  await band.press({ key: 'inbox-open' })
+  expect(opened).toBe(1)
+})
+
+test('a terminal summary stays collapsed after returning and toggles without model or prompt calls', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const prompts: string[] = []
+  world(on, prompts, {}, 'Other plugin', { 's:session-1': PREVIOUS_SESSION })
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  expect(await band.find({ text: /Investigate terminal startup text/ })).toBeUndefined()
+  expect((await band.find({ key: 'inbox-open' }))?.props.variant).toBe('secondary')
+  await clock.advance(16 * 60_000)
+  expect(await band.find({ text: /Investigate terminal startup text/ })).toBeUndefined()
+  await band.press({ key: 'inbox-summary' })
+  expect(await band.find({ text: /Investigate terminal startup text/ })).toBeDefined()
+  expect(await band.find({ text: /Reported the upstream issue/ })).toBeDefined()
+  expect(await band.find({ text: /Issue is open; nothing pending/ })).toBeDefined()
+  expect(await band.find({ text: /^Other plugin$/ })).toBeDefined()
+  await band.press({ key: 'inbox-summary' })
+  expect(await band.find({ text: /Investigate terminal startup text/ })).toBeUndefined()
+  await band.press({ key: 'inbox-summary' })
+  await $.session.end({ sessionId: 'session-1', reason: 'clear', resume: { id: 'session-1' } })
+  await $.classic.SessionStart({ source: 'clear', session_id: 'session-2', transcript_path: '/tmp/new.jsonl' })
+  expect(await band.find({ key: 'inbox-summary' })).toBeUndefined()
+  expect(prompts).toEqual([])
+  expect(sent).toEqual([])
+  expect(fills).toEqual([])
+})
+
+test('the collapsed session card preserves another plugin below it while working and at rest', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   world(on, [], {}, 'Prompt Rail navigation')
   await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
@@ -207,7 +246,7 @@ test('the session card preserves another plugin below it while working and at re
   expect(await band.find({ text: /Needs you 2/ })).toBeDefined()
   expect(await band.find({ text: 'Prompt Rail navigation' })).toBeDefined()
   await band.redraw({ ...BAND.props, isWorking: true })
-  expect(await band.find({ text: /Add a greeting CLI/ })).toBeDefined()
+  expect(await band.find({ text: /Add a greeting CLI/ })).toBeUndefined()
   expect(await band.find({ text: 'Prompt Rail navigation' })).toBeDefined()
   await band.redraw({ ...BAND.props, hasSurvey: true })
   expect(await band.find({ text: /Add a greeting CLI/ })).toBeUndefined()
@@ -354,6 +393,8 @@ test('Inbox is clickable before any update and badges open the requested tab wit
   })
   await clock.settle()
   await band.press({ key: 'inbox-nextSteps' })
+  expect((await band.find({ key: 'inbox-open' }))?.props.variant).toBe('primary')
+  expect((await band.find({ key: 'inbox-open' }))?.props.label).toBe('Inbox 3')
   const pane = await $.ui.mount(PANE)
   expect(await pane.find({ text: /Review retry coverage/ })).toBeDefined()
   expect(sent).toEqual([])
@@ -666,7 +707,7 @@ test('a task handed to Claude folds and leaves the count until Claude’s reply 
   expect(await band.find({ text: /Needs you 1/ })).toBeDefined()
 })
 
-test('after 15 idle minutes the band shows where the session stands', async ($, on) => {
+test('after 15 idle minutes only the expanded summary shows where the session stands', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   world(on, [])
 
@@ -680,6 +721,8 @@ test('after 15 idle minutes the band shows where the session stands', async ($, 
   expect(await band.find({ text: /last active/ })).toBeUndefined()
 
   await clock.advance(16 * 60_000)
+  expect(await band.find({ text: /last active/ })).toBeUndefined()
+  await band.press({ key: 'inbox-summary' })
   expect(await band.find({ text: /last active 16m ago/ })).toBeDefined()
   expect(await band.find({ text: /Add a greeting CLI/ })).toBeDefined()
 
@@ -711,6 +754,7 @@ test('resumed into a conversation it cannot fork yet, it catches up from the tra
     'Person: Add a greeting CLI. Node or Python?\nAgent: The plan is written. 1. Node or Python? 2. Name the command greet?',
   )
   const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  await band.press({ key: 'inbox-summary' })
   expect(await band.find({ text: /Add a greeting CLI/ })).toBeDefined()
   const pane = await $.ui.mount(PANE)
   expect(await pane.find({ text: /Use Node or Python\?/ })).toBeDefined()
@@ -768,6 +812,7 @@ test('after a failed update, the next reply recovers from bounded recent text', 
   })
   await clock.settle()
   const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  await band.press({ key: 'inbox-summary' })
   expect(await band.find({ text: /Ship the onboarding flow/ })).toBeDefined()
   // It closes what the conversation handled, keeps what still waits, and adds what is new.
   expect(await pane.find({ key: 'row-i1' })).toBeUndefined()

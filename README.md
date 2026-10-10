@@ -35,8 +35,17 @@ changes committed before bringing in upstream updates.
 
 ## Using it
 
-A line above your prompt shows what the session is working on and how many
-things are waiting on you.
+The terminal keeps a compact **MODS** row above your prompt. **Inbox** stays dim
+when there are no pending items, and uses the accent color with a total when
+there are questions, tasks, failed checks, findings, PR actions or available
+Next steps. This is an item count, not an unread-message count. Individual tab
+counts appear when the terminal is wide enough.
+
+**Summary ▸** reveals the session's goal, recent progress and current work;
+press it again to fold them away. It starts collapsed when a conversation
+loads and stays collapsed after idle time. The control is absent when there
+is nothing to summarize. Failed checks, stop notices and brief action feedback
+remain visible. These display controls make no model calls.
 
 Click a count to open its tab and first actionable row. The **Inbox** button is
 available even before the first update. The panel stays closed until you open it;
@@ -85,8 +94,9 @@ their readable palettes. In `/config`, the Inbox settings offer
 `appearance: oled | follow-theme` and a `nextSteps` toggle. Turning off Next
 steps removes its generation instructions; normal Inbox tracking continues.
 
-After 15 minutes with no activity, or when you resume a session, the line
-above the prompt expands into a short summary of where things stand.
+After 15 minutes with no activity, the expanded terminal summary also shows
+when the session was last active. The desktop app retains its existing summary
+layout, including automatic expansion after idle time or a session resume.
 
 On a fresh conversation, **Last session in this folder** can show the latest
 saved summary for that folder, up to seven days old. **Continue in draft** puts
@@ -169,8 +179,9 @@ same call without suggestion instructions. No new API key or service is added.
 ## Developing
 
 The above-prompt status composes with other mods, including Prompt Rail and
-Image View. Stopped, working and returning-session states keep their content
-visible too; surveys still take priority. The existing ledger protocol and
+Image View. Stop notices and previous-session continuation cards stay visible;
+the current session's summary is opt-in in the terminal. Surveys still take
+priority. The existing ledger protocol and
 durable saved-state format remain compatible. The Codex companion's model
 prompts, bundles and behavior are unchanged; these new UI features target the
 Claude Code mod.

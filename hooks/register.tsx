@@ -155,6 +155,7 @@ const PRESENCE = atom(
   } as Presence,
 )
 const PREVIOUS = atom({ plugin: 'inbox', key: 'previous' } as const, null as Previous | null)
+const SUMMARY_OPEN = atom({ plugin: 'inbox', key: 'isSummaryOpen' } as const, false)
 const TAB = atom({ plugin: 'inbox', key: 'tab' } as const, 'needsYou' as Tab)
 const NO_CURSOR: Cursor = { id: null, index: 0 }
 const NO_SELECTION: Record<Tab, Cursor> = {
@@ -2149,6 +2150,7 @@ async function turnOn($: EngineInterface) {
  */
 async function loadConversation($: EngineInterface, id: string, isCleared: boolean) {
   conversation++
+  await update($, SUMMARY_OPEN, () => false)
   await invalidateSuggestions($, true, id)
   sessionId = id
   ;[root, home] = await Promise.all([$.session.root(), $.env.get('HOME').then(h => h ?? '')])
@@ -2238,6 +2240,7 @@ export const register: Register = (on, options) => {
         update($, SNAPSHOTS, () => ({})),
         update($, SETTLED, () => []),
         update($, IS_DEMO, () => false),
+        update($, SUMMARY_OPEN, () => false),
         publishStatus($, true),
       ])
     }
@@ -2570,28 +2573,63 @@ export const register: Register = (on, options) => {
       { tab: 'prs', label: 'PRs', count: prCount },
       { tab: 'nextSteps', label: 'Next steps', count: nextCount },
     ]
+    const isTerminal = e.surface === 'terminal'
+    const card = ledger.card
+    const lines = bandLines(checks, root)
+    const hasSummary = !!card || lines.summary.length > 0 || ledger.closed.length > 0
+    const summaryOpen = await read($, SUMMARY_OPEN)
+    const pending = badges.reduce((n, b) => n + b.count, 0)
+    const activeBadges = badges.filter(b => b.count > 0)
+    // Keep the two primary controls on one row on narrow terminals. The Inbox
+    // total still includes every tab, which remains available in the pane.
+    const toolbarCells = 10 + `Inbox${pending ? ` ${pending}` : ''}`.length + 4 + (hasSummary ? 17 : 0)
+    const badgeCells = activeBadges.reduce((n, b) => n + `${b.label} ${b.count}`.length + 6, 0)
+    const showBadges = !isTerminal || toolbarCells + badgeCells <= e.props.bodyColumns
     const navigation = (
-      <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-        <Button
-          key="inbox-open"
-          label="Inbox"
-          variant="primary"
-          onPress={() =>
-            void openInboxTab(
-              $,
-              waiting ? 'needsYou' : findingCount ? 'findings' : nextCount ? 'nextSteps' : 'needsYou',
-            )
-          }
-        />
-        {badges
-          .filter(b => b.count > 0)
-          .map(b => (
+      <Box flexDirection="row" paddingLeft={isTerminal ? 2 : 0}>
+        {isTerminal && (
+          <Box width={8} flexShrink={0}>
+            <Text dimColor>MODS</Text>
+          </Box>
+        )}
+        <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+          <Button
+            key="inbox-open"
+            label={isTerminal && pending > 0 ? `Inbox ${pending}` : 'Inbox'}
+            variant={!isTerminal || pending > 0 ? 'primary' : 'secondary'}
+            dimColor={isTerminal && pending === 0}
+            onPress={() =>
+              void openInboxTab(
+                $,
+                waiting
+                  ? 'needsYou'
+                  : findingCount
+                    ? 'findings'
+                    : prCount
+                      ? 'prs'
+                      : nextCount
+                        ? 'nextSteps'
+                        : 'needsYou',
+              )
+            }
+          />
+          {(showBadges ? activeBadges : []).map(b => (
             <Button
               key={'inbox-' + b.tab}
               label={b.label + ' ' + b.count}
               onPress={() => void openInboxTab($, b.tab)}
             />
           ))}
+          {isTerminal && hasSummary && (
+            <Button
+              key="inbox-summary"
+              label={summaryOpen ? 'Summary ▾' : 'Summary ▸'}
+              variant="secondary"
+              dimColor
+              onPress={() => update($, SUMMARY_OPEN, open => !open)}
+            />
+          )}
+        </Box>
       </Box>
     )
 
@@ -2644,9 +2682,7 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const card = ledger.card
     // A failed check gets a line of its own, so a narrow band cannot cut it off.
-    const lines = bandLines(checks, root)
     // A failing check whose fix went to Claude no longer waits on the person, so its line is muted.
     const failedRows = lines.failing.map(c => (
       <Text wrap="truncate-end" color={c.fixSentAt === null ? 'error' : undefined} dimColor={c.fixSentAt !== null}>
@@ -2655,6 +2691,71 @@ export const register: Register = (on, options) => {
         {c.fixSentAt === null ? '' : ' · fix sent'}
       </Text>
     ))
+
+    if (isTerminal) {
+      const summary =
+        summaryOpen && hasSummary
+          ? [
+              ...(card
+                ? [
+                    <Text wrap="truncate-end">
+                      <Text bold>{card.goal}</Text>
+                      {presence.isAway && <Text dimColor> · last active {ago(now - presence.lastActiveAt)}</Text>}
+                    </Text>,
+                    ...(card.done.length
+                      ? [
+                          <Text wrap="truncate-end" dimColor>
+                            ✓ {card.done.slice(-3).join(' · ')}
+                          </Text>,
+                        ]
+                      : []),
+                    ...(card.now
+                      ? [
+                          <Text wrap="truncate-end" dimColor>
+                            → {card.now}
+                          </Text>,
+                        ]
+                      : []),
+                    ...card.running.slice(0, 3).map(run => (
+                      <Text wrap="truncate-end" dimColor>
+                        ● {run}
+                      </Text>
+                    )),
+                  ]
+                : []),
+              ...(lines.summary.length
+                ? [
+                    <Text wrap="truncate-end" dimColor>
+                      {lines.summary.map(c => checkLine(c, root)).join(' · ')}
+                    </Text>,
+                  ]
+                : []),
+              ...(ledger.closed.length
+                ? [
+                    <Text wrap="truncate-end" dimColor>
+                      Closed: {ledger.closed.slice(-2).map(closedLine).join(' · ')}
+                    </Text>,
+                  ]
+                : []),
+            ]
+          : []
+      return together(
+        <Box flexDirection="column">
+          {summary.length > 0 && (
+            <Box flexDirection="column" paddingLeft={10}>
+              {summary.slice(0, Math.max(1, e.props.maxRows - failedRows.length - 1))}
+            </Box>
+          )}
+          {failedRows}
+          {/* Immediate feedback stays briefly visible even with the summary folded. */}
+          {settled.length > 0 && (
+            <Text wrap="truncate-end" color={DONE}>
+              {settled.map(s => ` · ✓ ${settledText(s).what} → ${settledText(s).outcome}`).join('')}
+            </Text>
+          )}
+        </Box>,
+      )
+    }
 
     if (!card && ledger.items.length === 0 && ledger.findings.length === 0 && settled.length === 0) {
       // Before the session's first card, failed checks are all the band has to show.
