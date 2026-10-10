@@ -26,6 +26,7 @@ let draft = ''
 let fills: { text: string; mode: string }[] = []
 let canFill = true
 let opened = 0
+let closed: string[] = []
 let modelWait = async () => {}
 let fillWait = async () => {}
 let readWait = async () => {}
@@ -116,6 +117,7 @@ function world(
   fills = []
   canFill = true
   opened = 0
+  closed = []
   modelWait = async () => {}
   fillWait = async () => {}
   readWait = async () => {}
@@ -134,6 +136,10 @@ function world(
   on('ui.open', () => {
     opened++
     return { value: { isPlaced: true as const } }
+  })
+  on('ui.close', ($, e) => {
+    closed.push(e.id)
+    return { value: undefined }
   })
   on('command.list', () => ({
     value: [{ name: 'review-tests', description: 'Review tests', source: 'plugin' as const }],
@@ -195,6 +201,45 @@ function world(
     return e.component === 'AbovePrompt' && bandText ? Text({ children: bandText }) : Box({})
   })
 }
+
+for (const layout of [
+  { placement: 'dock' as const, bodyColumns: 80, isFocused: true },
+  { placement: 'inline' as const, bodyColumns: 28, isFocused: false },
+]) {
+  test(`the ${layout.placement} pane has its own close button without changing the conversation`, async ($, on) => {
+    mock.clock(on, { now: 1_000_000 })
+    const prompts: string[] = []
+    world(on, prompts)
+    await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+    draft = 'Keep this draft and [Image #1].'
+    await $.command.run({ command: 'inbox', args: '' } as never)
+    const pane = await $.ui.mount({ ...PANE, props: { ...PANE.props, ...layout } })
+    expect((await pane.find({ key: 'pane-close' }))?.props.label).toBe('Close Inbox')
+    expect(await pane.find({ text: layout.isFocused ? 'Esc to close' : 'ctrl+x tab to focus' })).toBeDefined()
+    await pane.press({ key: 'key-list' })
+    expect(await pane.find({ text: 'Close Inbox while the pane has focus' })).toBeDefined()
+    expect(await pane.find({ text: 'Close the focused pane' })).toBeDefined()
+    await pane.press({ key: 'pane-close' })
+    expect(closed).toEqual(['inbox'])
+    expect(draft).toBe('Keep this draft and [Image #1].')
+    expect(fills).toEqual([])
+    expect(sent).toEqual([])
+    expect(prompts).toEqual([])
+  })
+}
+
+test('the sample pane can close without sending its entries to Claude', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const prompts: string[] = []
+  world(on, prompts)
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'inbox', args: 'demo' } as never)
+  const pane = await $.ui.mount(PANE)
+  await pane.press({ key: 'pane-close' })
+  expect(closed).toEqual(['inbox'])
+  expect(sent).toEqual([])
+  expect(prompts).toEqual([])
+})
 
 test('an empty terminal Inbox is dim, still opens, and has no empty summary', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })

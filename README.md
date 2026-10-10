@@ -52,6 +52,13 @@ available even before the first update. The panel stays closed until you open it
 new suggestions never pop it open or switch it away from the tab you are reading.
 The host places the panel beside the chat when there is room, or inline otherwise.
 
+**Close Inbox**, inside the panel at the top left, closes only the Inbox pane.
+It is separate from a terminal host's tab-close button and works even when the
+composer has keyboard focus. It does not submit or replace your draft.
+With the default shortcuts, press **ctrl+x, then Tab** to focus the pane, then
+**Esc** to close it; **ctrl+x, then x** also closes the focused pane. The hint
+beside the button follows the pane's focus, and **Keys** lists both close paths.
+
 The panel has four tabs:
 
 - **Needs you**: questions Claude asked you, tasks only you can do, and tests

@@ -196,7 +196,7 @@ const ARRIVAL_MS = 1500
 const IS_DEMO = atom({ plugin: 'inbox', key: 'isDemo' } as const, false)
 const SAMPLE_PRESS = 'Sample entry: nothing was sent. Run /inbox demo to go back.'
 // The pane's buttons that only move around it, which work in the demo. Every other press there sends nothing.
-const DEMO_PRESSES = /^(tab-|title-|select-|typekey-|fold-|key-list$|next$|previous$)/
+const DEMO_PRESSES = /^(tab-|title-|select-|typekey-|fold-|key-list$|pane-close$|next$|previous$)/
 const PR_POLL_MS = 2 * 60_000
 const MAX_PRS = 6
 
@@ -3674,8 +3674,35 @@ export const register: Register = (on, options) => {
       { keys: TABS.map(t => t.hotkey).join(' '), does: 'Switch tabs' },
       { keys: 'j k', does: 'Select the next or previous row' },
       { keys: 'ctrl+x tab', does: 'Move focus between the pane and the session' },
+      { keys: 'esc', does: 'Close Inbox while the pane has focus' },
+      { keys: 'ctrl+x x', does: 'Close the focused pane' },
     ]
     const keyColumn = Math.max(...keyList.map(k => k.keys.length)) + 2
+
+    // Keep an explicit close control inside the pane, at the left. A terminal
+    // host may overlay its own tab-close button on the frame's top-right corner.
+    const paneControls = (
+      <Box
+        key="pane-controls"
+        paddingX={isInline ? 2 : 1}
+        paddingBottom={blankLine}
+        flexDirection="row"
+        flexWrap="wrap"
+        alignItems="center"
+        columnGap={2}
+      >
+        <Button
+          key="pane-close"
+          label="Close Inbox"
+          variant="secondary"
+          hover={raise}
+          onPress={() => void $.ui.close({ id: PANE })}
+        />
+        <Text color={pal.muted} wrap="wrap">
+          {e.props.isFocused ? 'Esc to close' : 'ctrl+x tab to focus'}
+        </Text>
+      </Box>
+    )
 
     // The tab bar is drawn on the pane's own background, as part of the pane's
     // title bar, with when the inbox last updated at its right end, or under the
@@ -4189,6 +4216,7 @@ export const register: Register = (on, options) => {
     // k and the selected row's keys are Buttons in a hidden Box.
     return (
       <Box flexDirection="column" minHeight={isInline ? undefined : e.props.scroll.bodyRows} backgroundColor={pal.body}>
+        {paneControls}
         {tabs}
         {/* ▔ draws at the top of its cell, so the rule touches the tabs' bottom edge
             and the rest of its row stands in for the blank line above the content.
