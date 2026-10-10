@@ -1,6 +1,6 @@
 # inbox, for claude code
 
-A Claude Code mod that gathers and intelligently manages outstanding questions, tasks, issues, and opportunities into one nicely organized place alongside your session. Just use `/inbox`.
+A Claude Code mod that gathers questions, tasks, findings, PR reviews, and optional next-action drafts beside your session. Click **Inbox** above the prompt or use `/inbox`.
 
 https://github.com/user-attachments/assets/560f80be-e6fb-484e-8a3f-7b4828b98fb2
 
@@ -9,15 +9,15 @@ https://github.com/user-attachments/assets/560f80be-e6fb-484e-8a3f-7b4828b98fb2
 In a Claude Code session, type:
 
 ```
-/plugin install inbox --marketplace petekp/inbox
+/plugin install inbox --marketplace suatkocar/inbox
 ```
 
 Answer `y` to add the marketplace, then choose a scope. It starts working in
 that session.
 
-- It makes one Sonnet call after each of Claude's replies. See [Cost](#cost).
+- It makes one bounded Sonnet call after each eligible reply, including Next steps. See [Cost](#cost).
 - The PRs tab needs the GitHub CLI, `gh`, signed in.
-- It was built and tested with Claude Code 2.1.292.
+- This fork was checked with Claude Code 2.1.296.
 
 To update, run `claude plugin update inbox`, then `/reload-plugins` in any
 session that's already open.
@@ -38,7 +38,12 @@ changes committed before bringing in upstream updates.
 A line above your prompt shows what the session is working on and how many
 things are waiting on you.
 
-Type `/inbox` to see them. It opens a panel with three tabs:
+Click a count to open its tab and first actionable row. The **Inbox** button is
+available even before the first update. The panel stays closed until you open it;
+new suggestions never pop it open or switch it away from the tab you are reading.
+The host places the panel beside the chat when there is room, or inline otherwise.
+
+The panel has four tabs:
 
 - **Needs you**: questions Claude asked you, tasks only you can do, and tests
   or builds that failed.
@@ -46,16 +51,39 @@ Type `/inbox` to see them. It opens a panel with three tabs:
   working on.
 - **PRs**: pull requests from this session and your current branch, what's
   blocking each one, and review comments waiting on you.
+- **Next steps**: up to three optional, concrete follow-up drafts, produced in
+  the same update as the ledger. These do not count as things waiting on you.
+  A finished task may have no suggestions.
 
 Each item shows what you can do with it. To answer a question, press the
 letter next to the answer you want, and it goes to Claude as your message. You
 can also have Claude fix a finding, mark a task done, or dismiss anything you
 don't need.
 
-In the panel, `1`, `2` and `3` switch tabs, `j` and `k` move up and down, and
+In the panel, `1`, `2`, `3` and `4` switch tabs, `j` and `k` move up and down, and
 an action's letter runs it. You can also click. ctrl+x tab moves between the
 panel and the session. When the tab you're on is empty and something new
 arrives on another tab, the panel switches to it.
+
+In **Next steps**, select a row to read the complete proposed message.
+**Add to draft** (`a`) appends it to the message box, preserving existing text
+and image references. It never sends a message or runs a command. Review the
+draft, edit it if needed, and send it yourself. **Dismiss** (`x`) hides an
+unwanted suggestion. Repeated clicks cannot append the same suggestion twice.
+A blocked composer shows a retryable notice.
+
+Suggestions expire when you submit another message, start a turn, run a work
+command, or change conversations. Dismissed/drafted prompts are suppressed for
+the rest of the running conversation, including a plugin reload (last 12 exact
+normalized prompts); reworded suggestions can still recur. Suggestions are not
+stored in the durable ledger. A fresh process starts without this suppression
+history and waits for the next reply to suggest anything.
+
+The default **OLED** appearance uses a black background, restrained dark cards,
+and a compact tab strip in the standard dark theme. Light and ANSI themes retain
+their readable palettes. In `/config`, the Inbox settings offer
+`appearance: oled | follow-theme` and a `nextSteps` toggle. Turning off Next
+steps removes its generation instructions; normal Inbox tracking continues.
 
 After 15 minutes with no activity, or when you resume a session, the line
 above the prompt expands into a short summary of where things stand.
@@ -93,24 +121,49 @@ back to your own.
 
 ## Cost
 
-You might be wondering how many extra tokens the inbox uses. It adds two
-things:
+Next steps adds **no separate model call**. The existing tool-less Sonnet call
+returns the ledger first and optional NEXT records last. Its fixed instructions
+request caching. Normal updates use the previous short ledger and one exchange,
+not the full conversation.
 
-| What the inbox adds | Tokens | Cost at API prices |
-|---|---|---|
-| A Sonnet call after each of Claude's replies, to update the inbox | 3–4k in, about 2k of it cached. 100–250 out. | About 0.5¢ per reply, or 1¢ after 5 idle minutes |
-| Its instructions and tools, sent with every request Claude makes | About 1,350, cached | Under 0.1¢ per request |
+Dynamic input has a hard **24,000 UTF-8 byte** ceiling (not 24,000 tokens).
+Within it, the latest user message is capped at 2,400 bytes, activity at 1,200,
+the numbered reply at 7,000, and check evidence at about 2,000. Failed and stale
+checks are prioritized. The skill catalog includes only relevant command names
+and short descriptions, at most 1,200 bytes; skill files are never included.
+Images and full tool-result bodies are not supplied to this call.
 
-In one long Opus session, this came to about 1% of the total cost. A shorter
-or cheaper session pays a larger share. On a Claude plan, these count toward
-your usage limits.
+Recovery after a missed update uses at most 10,000 bytes of recent conversation
+text plus the bounded ledger, also within the total ceiling. It uses one Sonnet
+completion, **never a full-context fork of the main model**. Recovery produces
+no Next steps; those resume after the next normal update. Older missed details
+outside the excerpt cannot be reconstructed reliably, so absence from the
+excerpt is not evidence that an old item was resolved.
+
+Output is capped at 2,200 tokens (1,600 with Next steps off), not padded to that
+size. Suggestions are limited to three, with 60-byte labels and 360-byte prompts.
+Invalid or cut-off NEXT records are dropped without discarding a valid ledger.
+Shortening the model's input never truncates the actual saved items.
+
+In 24 tool-less synthetic CLI comparisons, baseline input was 2,720–2,753 tokens
+and integrated input 3,206–3,245 tokens, including cached input. Integrated
+output was 55–200 tokens. These are measurements of short fixtures, not a
+per-turn guarantee or a billing quote. The CLI comparison's cache handling can
+differ from the mod runtime. See [validation](docs/validation-next-steps.md).
+
+Inbox uses Claude Code's current provider and authentication. On a Claude plan,
+these calls consume the plan's usage allowance; with an API/provider account,
+that account's usage applies. One shared call still costs more tokens than the
+same call without suggestion instructions. No new API key or service is added.
 
 ## Developing
 
 The above-prompt status composes with other mods, including Prompt Rail and
 Image View. Stopped, working and returning-session states keep their content
-visible too; surveys still take priority. This changes no ledger model prompt,
-saved-state format or check-tracking behavior.
+visible too; surveys still take priority. The existing ledger protocol and
+durable saved-state format remain compatible. The Codex companion's model
+prompts, bundles and behavior are unchanged; these new UI features target the
+Claude Code mod.
 
 Run the mod from a clone:
 
@@ -122,3 +175,14 @@ The session reloads the mod when you change one of its files.
 `./scripts/check.sh` runs Prettier, `claude plugin validate`, a type check and
 the tests. The type check needs the types Claude Code writes to
 `.claude-plugin/types/` the first time it loads the mod.
+
+Prompt changes can be compared with synthetic exchanges, using your existing
+Claude sign-in and usage allowance:
+
+```sh
+node scripts/evaluate-prompts.mjs --run --output=/tmp/inbox-prompts.json
+node scripts/evaluate-prompts.mjs --run --recovery-only --output=/tmp/inbox-recovery.json
+```
+
+The first runs 24 comparisons, the second 12. They disable tools, customizations,
+MCP servers and session persistence, and do not load the Inbox plugin or its store.

@@ -91,14 +91,12 @@ import {
   EMPTY,
   ago,
   applyUpdate,
-  buildPrompt,
   carryText,
   closeItem,
   type Closing,
   commandRowLine,
   dialogLine,
   parseReply,
-  catchUpPrompt,
   CLAUDE_CODE,
   isLapsed,
   promptNotes,
@@ -113,7 +111,6 @@ import {
   systemText,
   tasksRunBy,
   toolActivity,
-  transcriptCatchUpPrompt,
   transcriptText,
   TOLD_NOTHING,
   type Told,
@@ -130,8 +127,20 @@ import {
   recordFinding,
 } from './tools'
 import { readRepo, type TreeIO } from './tree'
+import {
+  boundedRecoveryPrompt,
+  boundedUpdatePrompt,
+  commandCatalog,
+  NEXT_INSTRUCTIONS,
+  NO_SUGGESTIONS,
+  OUTPUT_TOKENS,
+  parseSuggestions,
+  suggestionKey,
+  type Suggestions,
+} from './next-steps'
 
 const LEDGER = atom({ plugin: 'inbox', key: 'ledger' } as const, EMPTY)
+const SUGGESTIONS = atom({ plugin: 'inbox', key: 'suggestions' } as const, NO_SUGGESTIONS)
 const PRESENCE = atom(
   { plugin: 'inbox', key: 'presence' } as const,
   {
@@ -147,7 +156,12 @@ const PRESENCE = atom(
 const PREVIOUS = atom({ plugin: 'inbox', key: 'previous' } as const, null as Previous | null)
 const TAB = atom({ plugin: 'inbox', key: 'tab' } as const, 'needsYou' as Tab)
 const NO_CURSOR: Cursor = { id: null, index: 0 }
-const NO_SELECTION: Record<Tab, Cursor> = { needsYou: NO_CURSOR, findings: NO_CURSOR, prs: NO_CURSOR }
+const NO_SELECTION: Record<Tab, Cursor> = {
+  needsYou: NO_CURSOR,
+  findings: NO_CURSOR,
+  prs: NO_CURSOR,
+  nextSteps: NO_CURSOR,
+}
 const SELECTION = atom({ plugin: 'inbox', key: 'selection' } as const, NO_SELECTION)
 // Whether Claude Code uses its `dark` theme, which picks the selected row's tint.
 const THEME = atom({ plugin: 'inbox', key: 'theme' } as const, '')
@@ -294,19 +308,35 @@ type Palette = {
 
 // Hex tuned for one theme, each tone checked against the pane, the cards, the
 // selected tab and the selected row. They hold only for the theme they name.
-const DARK_TONES = { needsYou: '#ffc107', findings: '#cab0ff', prs: '#8cc8c0', done: '#7ecd8f', error: '#ffa3b0' }
+const DARK_TONES = {
+  needsYou: '#ffc107',
+  findings: '#cab0ff',
+  prs: '#8cc8c0',
+  nextSteps: '#8fc9f8',
+  done: '#7ecd8f',
+  error: '#ffa3b0',
+}
 const DARK_DALTONIZED_TONES = {
   needsYou: '#ffcc00',
   findings: '#cab0ff',
   prs: '#a3c2c2',
+  nextSteps: '#82c1ff',
   done: '#82c1ff',
   error: '#ffa3a3',
 }
-const LIGHT_TONES = { needsYou: '#745417', findings: '#7b00e8', prs: '#006363', done: '#25652f', error: '#a5293d' }
+const LIGHT_TONES = {
+  needsYou: '#745417',
+  findings: '#7b00e8',
+  prs: '#006363',
+  nextSteps: '#005885',
+  done: '#25652f',
+  error: '#a5293d',
+}
 const LIGHT_DALTONIZED_TONES = {
   needsYou: '#7a4900',
   findings: '#7400db',
   prs: '#2d5a5a',
+  nextSteps: '#005885',
   done: '#005885',
   error: '#ad0000',
 }
@@ -322,6 +352,17 @@ const DARK_PALETTE: Palette = {
   tone: DARK_TONES,
   // A marker needs only 3:1, so a failing check's ✗ takes Claude Code's own red, which text here could not.
   mark: { ...DARK_TONES, error: '#ff6b80' },
+}
+const OLED_PALETTE: Palette = {
+  ...DARK_PALETTE,
+  body: '#000000',
+  card: '#101010',
+  tab: '#101010',
+  raised: '#202020',
+  selection: '#19232d',
+  muted: '#aeb6c0',
+  line: '#404852',
+  divider: '#262b31',
 }
 const LIGHT_PALETTE: Palette = {
   card: '#e6e6e6',
@@ -351,7 +392,7 @@ const DARK_ANSI_PALETTE: Palette = {
   line: 'userMessageBackground', // bright black
   divider: 'userMessageBackground',
   tone: {},
-  mark: { needsYou: NEEDS_YOU, findings: FINDINGS, prs: PRS, done: DONE, error: 'error' }, // the bright colors
+  mark: { needsYou: NEEDS_YOU, findings: FINDINGS, prs: PRS, nextSteps: 'suggestion', done: DONE, error: 'error' }, // the bright colors
 }
 const LIGHT_ANSI_PALETTE: Palette = {
   body: 'userMessageBackgroundHover', // bright white
@@ -363,7 +404,14 @@ const LIGHT_ANSI_PALETTE: Palette = {
   divider: 'userMessageBackground',
   tone: {},
   // Red, magenta, blue, green and red: the theme's yellow and cyan fall under 3:1 on bright white.
-  mark: { needsYou: 'error', findings: FINDINGS, prs: 'suggestion', done: DONE, error: 'error' },
+  mark: {
+    needsYou: 'error',
+    findings: FINDINGS,
+    prs: 'suggestion',
+    nextSteps: 'suggestion',
+    done: DONE,
+    error: 'error',
+  },
 }
 const PALETTES: Record<string, Palette> = {
   dark: DARK_PALETTE,
@@ -400,12 +448,13 @@ const THEME_KEY_PALETTE: Palette = {
   line: 'subtle',
   divider: 'subtle',
   tone: {},
-  mark: { needsYou: NEEDS_YOU, findings: FINDINGS, prs: PRS, done: DONE, error: 'error' },
+  mark: { needsYou: NEEDS_YOU, findings: FINDINGS, prs: PRS, nextSteps: 'suggestion', done: DONE, error: 'error' },
 }
 const TABS: { id: Tab; label: string; hotkey: string }[] = [
   { id: 'needsYou', label: 'Needs you', hotkey: '1' },
   { id: 'findings', label: 'Findings', hotkey: '2' },
   { id: 'prs', label: 'PRs', hotkey: '3' },
+  { id: 'nextSteps', label: 'Next steps', hotkey: '4' },
 ]
 // The blank columns on each side of a docked tab's name, which a click there also selects.
 const TAB_PAD = '  '
@@ -451,6 +500,10 @@ let isSaved = false
 let queue: Promise<void> = Promise.resolve()
 // Counts the conversations this process has run, so an update queued in one never writes into the next.
 let conversation = 0
+let suggestionRevision = 0
+let nextStepsEnabled = true
+let oled = true
+const drafting = new Set<string>()
 // What Claude last read of the inbox beside a prompt, so it is sent again only when it changed.
 let told: Told = TOLD_NOTHING
 // The line last published to this pane's Herdr sidebar row, and the chain that publishes in order.
@@ -511,16 +564,21 @@ async function syncTheme($: EngineInterface) {
 }
 
 async function save($: EngineInterface, ledger: Ledger) {
+  const id = sessionId
+  const folder = root
+  const generation = conversation
   const savedAt = await $.clock.now()
-  const key = `s:${sessionId}`
+  if (generation !== conversation) return
+  const key = `s:${id}`
   // The first save in a process deletes the key first, moving it to the end of
   // the store's insertion order, which the pruning treats as most recent. Later
   // saves only overwrite, so pruning runs once per process.
   if (!isSaved) await $.store.delete(key)
   await Promise.all([
     $.store.set(key, { savedAt, ledger }),
-    ledger.card ? $.store.set(`p:${root}`, { savedAt, ledger }) : undefined,
+    ledger.card ? $.store.set(`p:${folder}`, { savedAt, ledger }) : undefined,
   ])
+  if (generation !== conversation) return
   if (isSaved) return
   isSaved = true
   const sessions = (await $.store.keys()).filter(k => k.startsWith('s:'))
@@ -640,12 +698,15 @@ function permissionText(tool: string, input: Record<string, unknown>): string {
 
 /** Changes the ledger and saves it, so a resumed session finds it. */
 async function commitLedger($: EngineInterface, change: (l: Ledger) => Ledger): Promise<void> {
+  const generation = conversation
   let before: Ledger = EMPTY
   const after = await update($, LEDGER, l => {
     before = l
-    return change(l)
+    return generation === conversation ? change(l) : l
   })
+  if (generation !== conversation) return
   await save($, after)
+  if (generation !== conversation) return
   void publishStatus($)
   await showSettled($, before, after)
   // After showSettled, so a row this change closed holds its tab.
@@ -739,46 +800,65 @@ async function applyLedgerReply(
   const parsed = parseReply(r.text, source)
   if (!parsed || at !== conversation) return 'failed'
   const now = await $.clock.now()
-  await commitLedger($, l => change(l, parsed, now))
+  await commitLedger($, l => (at === conversation ? change(l, parsed, now) : l))
 
   return 'current'
 }
 
 /** Asks the ledger model to update the ledger, with systemText as its instructions, cached for the next call within five minutes. */
 function askLedgerModel($: EngineInterface, prompt: string, timeoutMs: number): Promise<ModelResult> {
-  const system = [{ text: systemText(CLAUDE_CODE), cache: true as const }]
+  const system = [{ text: systemText(CLAUDE_CODE) + (nextStepsEnabled ? NEXT_INSTRUCTIONS : ''), cache: true as const }]
 
-  return $.model.complete({ model: MODEL, system, prompt, maxTokens: 1600, effort: 'low', timeoutMs })
+  return $.model.complete({
+    model: MODEL,
+    system,
+    prompt,
+    maxTokens: nextStepsEnabled ? OUTPUT_TOKENS : 1600,
+    effort: 'low',
+    timeoutMs,
+  })
 }
 
 /** Updates the ledger from one exchange. */
-async function runUpdate($: EngineInterface, at: number, ex: Exchange): Promise<LedgerState> {
+async function runUpdate($: EngineInterface, at: number, ex: Exchange, revision: number): Promise<LedgerState> {
   const promptAt = await $.clock.now()
-  const r = await askLedgerModel($, buildPrompt(await read($, LEDGER), ex), 45_000)
+  const commands = nextStepsEnabled ? await $.command.list().catch(() => []) : []
+  const catalog = commandCatalog(commands, (ex.person ?? '') + ' ' + ex.reply)
+  const state = await read($, SUGGESTIONS)
+  const r = await askLedgerModel($, boundedUpdatePrompt(await read($, LEDGER), ex, catalog, state.dismissed), 45_000)
   // An Explain turn talks about its item without deciding it.
   const explained = ex.press?.action === 'explain' ? ex.press.id : null
 
-  return applyLedgerReply($, at, r, [ex.reply, ...ex.activity].join('\n'), (l, u, now) =>
+  const result = await applyLedgerReply($, at, r, [ex.reply, ...ex.activity].join('\n'), (l, u, now) =>
     applyUpdate(l, { ...u, closed: u.closed.filter(c => c.id !== explained) }, now, ex.turn, promptAt),
   )
+  if (nextStepsEnabled && at === conversation && revision === suggestionRevision) {
+    await update($, SUGGESTIONS, (s): Suggestions => ({
+      ...s,
+      status: result === 'current' ? 'ready' : 'failed',
+      items:
+        result === 'current' && r.isAnswered
+          ? parseSuggestions(r.text, catalog.known, s.dismissed).map(i => ({ ...i, id: i.id + '-' + revision }))
+          : [],
+      notice: '',
+    }))
+  }
+  return result
 }
 
 /**
- * Brings the ledger up to date over the whole conversation, for turns the
- * per-turn update missed: it closes what was handled and adds what still waits.
+ * Recover missed updates from a bounded recent text excerpt. This never forks
+ * the main model or sends images, tool output bodies, or the full conversation.
  */
 async function catchUp($: EngineInterface, at: number): Promise<LedgerState> {
   const [ledger, shown] = await Promise.all([read($, LEDGER), screen($)])
   const change = (l: Ledger, u: Update, now: number) => applyUpdate(l, u, now, l.turn)
-  const forked = await $.model.fork({ prompt: catchUpPrompt(CLAUDE_CODE, ledger, shown) })
-  if (forked.isAnswered || forked.reason !== 'nothing-to-fork') return applyLedgerReply($, at, forked, null, change)
-  // A resumed conversation has no request of this process's to fork until its
-  // first reply, so the model reads the transcript instead, uncached.
   const transcript = transcriptText(await $.session.messages())
   if (!transcript) return 'behind'
-  const r = await askLedgerModel($, transcriptCatchUpPrompt(ledger, shown, transcript), 90_000)
+  const prompt = boundedRecoveryPrompt(ledger, shown, transcript)
+  const r = await askLedgerModel($, prompt, 90_000)
 
-  return applyLedgerReply($, at, r, transcript, change)
+  return applyLedgerReply($, at, r, prompt, change)
 }
 
 /**
@@ -787,13 +867,24 @@ async function catchUp($: EngineInterface, at: number): Promise<LedgerState> {
  */
 function queueUpdate($: EngineInterface, next: { ex: Exchange; turnsStarted: number } | null) {
   const at = conversation
+  const revision = suggestionRevision
   queue = queue.then(async () => {
     if (at !== conversation) return
     const { ledgerState, turnsStarted } = await update($, PRESENCE, p => ({ ...p, isUpdating: true }))
-    const state = await (ledgerState !== 'current' || next === null ? catchUp($, at) : runUpdate($, at, next.ex)).catch(
+    const recovering = ledgerState !== 'current' || next === null
+    if (nextStepsEnabled && revision === suggestionRevision)
+      await update($, SUGGESTIONS, (s): Suggestions => ({
+        ...s,
+        status: recovering ? 'idle' : 'loading',
+        items: [],
+        notice: '',
+      }))
+    const state = await (recovering ? catchUp($, at) : runUpdate($, at, next!.ex, revision)).catch(
       (): LedgerState => 'failed',
     )
     if (at !== conversation) return
+    if (nextStepsEnabled && revision === suggestionRevision && state === 'failed')
+      await update($, SUGGESTIONS, (s): Suggestions => ({ ...s, status: 'failed', items: [] }))
     // An exchange covers the turns started by its end; a catch-up, those started before it ran.
     const applied = next?.turnsStarted ?? turnsStarted
     await update($, PRESENCE, p => ({
@@ -855,6 +946,7 @@ async function appendContext($: EngineInterface, context: string[]) {
  * numbered answer refers to, and the inbox when it changed.
  */
 async function notePrompt($: EngineInterface, text: string, sentBy: Press | null): Promise<string[]> {
+  await invalidateSuggestions($)
   const [now, ledger, prev, isShown] = await Promise.all([
     $.clock.now(),
     update($, LEDGER, l => ({ ...l, turn: l.turn + 1 })),
@@ -1038,6 +1130,82 @@ function openPane($: EngineInterface) {
   return $.ui.open({ id: PANE, title: 'Inbox', focus: true, closeOnEscape: true })
 }
 
+/** Recommendations expire as soon as the conversation advances, including late replies. */
+async function invalidateSuggestions($: EngineInterface, reset = false, forSession?: string) {
+  const revision = ++suggestionRevision
+  await update($, SUGGESTIONS, (s): Suggestions => ({
+    ...NO_SUGGESTIONS,
+    revision,
+    sessionId: forSession ?? s?.sessionId ?? '',
+    dismissed: (!reset || (!!forSession && s?.sessionId === forSession)) && s?.version === 1 ? s.dismissed : [],
+  }))
+}
+
+async function dismissSuggestion($: EngineInterface, id: string) {
+  await update($, SUGGESTIONS, s => {
+    const item = s.items.find(i => i.id === id)
+    return item
+      ? {
+          ...s,
+          items: s.items.filter(i => i.id !== id),
+          dismissed: [...s.dismissed, suggestionKey(item.prompt)].slice(-12),
+          notice: 'Suggestion dismissed.',
+        }
+      : s
+  })
+}
+
+/** Append is atomic with respect to existing composer content; replace is never used. */
+async function draftSuggestion($: EngineInterface, id: string) {
+  if (drafting.has(id)) return
+  drafting.add(id)
+  const revision = suggestionRevision
+  const notice = (text: string) => update($, SUGGESTIONS, s => (s.revision === revision ? { ...s, notice: text } : s))
+  try {
+    const item = (await read($, SUGGESTIONS)).items.find(i => i.id === id)
+    if (!item || item.drafted) return
+    if (isTurnRunning) {
+      await notice('Wait for this reply to finish before adding a draft.')
+      return
+    }
+    const draft = await $.prompt.read()
+    if (revision !== suggestionRevision) return
+    const result = await $.prompt.fill({ text: (draft.text ? '\n\n' : '') + item.prompt, mode: 'append' })
+    if (revision !== suggestionRevision) return
+    if (!result.isFilled) {
+      await notice('Draft could not be added. Close any dialog, focus the message box and try again.')
+      return
+    }
+    await update($, SUGGESTIONS, (s): Suggestions => ({
+      ...s,
+      items: s.items.map(i => (i.id === id ? { ...i, drafted: true } : i)),
+      dismissed: [...s.dismissed, suggestionKey(item.prompt)].slice(-12),
+      notice: 'Added to draft. Review it, then send when ready.',
+    }))
+  } catch {
+    await notice('Draft could not be added. Try again from the message box.')
+  } finally {
+    drafting.delete(id)
+  }
+}
+
+/** A band badge opens the exact tab and selects its first actionable row. */
+async function openInboxTab($: EngineInterface, tab: Tab) {
+  await showTab($, tab)
+  const placed = await openPane($)
+  if (!placed.isPlaced) {
+    await $.ui.toast('Inbox will appear when the terminal has room. /inbox opens it again.')
+    return
+  }
+  await followNewRows($, true)
+  const { ledger, checks, prViews } = await drawnState($)
+  const ids =
+    tab === 'nextSteps'
+      ? (await read($, SUGGESTIONS)).items.map(i => i.id)
+      : tabRowIds(ledger, checks, Object.values(prViews.views))[tab]
+  await jumpTo($, tab, ids[0] ? { id: ids[0], index: 0 } : null)
+}
+
 /** Opens the free-text field under a row and gives it the keyboard. */
 async function startTyping($: EngineInterface, id: string) {
   await update($, TYPING, () => id)
@@ -1175,7 +1343,7 @@ function selectedIndex(ids: string[], cursor: Cursor): number {
 function newRows(isDemo: boolean, current: Record<Tab, string[] | null>): Record<Tab, string[]> {
   const before = recordedRows?.isDemo === isDemo ? recordedRows.ids : {}
   const ids = { ...before }
-  const added: Record<Tab, string[]> = { needsYou: [], findings: [], prs: [] }
+  const added: Record<Tab, string[]> = { needsYou: [], findings: [], prs: [], nextSteps: [] }
   for (const { id: tab } of TABS) {
     const listed = current[tab]
     if (listed === null) continue
@@ -1214,6 +1382,7 @@ async function jumpTo($: EngineInterface, tab: Tab, row: { id: string; index: nu
 /** Each tab's row ids, in the order the pane lists them. */
 function tabRowIds(ledger: Ledger, checks: Checks, prViews: PrView[]): Record<Tab, string[]> {
   return {
+    nextSteps: [],
     needsYou: [
       ...waitingChecks(checks).map(checkRowId),
       ...NEEDS_YOU_GROUPS.flatMap(g => listedItems(ledger.items, g.kind).map(i => i.id)),
@@ -1261,6 +1430,8 @@ async function followNewRows($: EngineInterface, isOpening = false) {
       ids.findings.length === 0 &&
       !Object.values(lastActions).some(n => n.tab === 'findings' && now - n.at < SETTLED_MS),
     prs: prViews.length === 0 && !prState.isFetching,
+    // Optional recommendations never steal the panel from another tab.
+    nextSteps: false,
   }[tab]
   const to = isEmpty ? TABS.find(t => t.id !== tab && added[t.id].length > 0)?.id : undefined
   if (!to) return
@@ -1938,6 +2109,8 @@ async function turnOn($: EngineInterface) {
  * id without a session.start. A cleared conversation brings in no previous card.
  */
 async function loadConversation($: EngineInterface, id: string, isCleared: boolean) {
+  conversation++
+  await invalidateSuggestions($, true, id)
   sessionId = id
   ;[root, home] = await Promise.all([$.session.root(), $.env.get('HOME').then(h => h ?? '')])
   isSaved = false
@@ -1986,7 +2159,9 @@ async function loadConversation($: EngineInterface, id: string, isCleared: boole
   if (loaded.prs.length > 0) void fetchPrs($, false)
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  nextStepsEnabled = options.nextSteps !== false
+  oled = options.appearance !== 'follow-theme'
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     // The desktop app runs its sessions headless and attaches to them, before
@@ -2013,6 +2188,7 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
+    if (isOn) await invalidateSuggestions($, true)
     // The pane outlives the session, so its sidebar line goes with it.
     if (isOn) {
       await Promise.all([
@@ -2063,6 +2239,7 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
+    if (isOn) await invalidateSuggestions($)
     isTurnRunning = true
     // A turn that starts means the session runs again. Counted here, before the
     // turn can end, since a reload can cut off its end-of-turn hook.
@@ -2291,6 +2468,7 @@ export const register: Register = on => {
     const row = readCommandRow(messageText(e.message))
     if (!row) return r
     const line = commandRowLine(row)
+    if (line && row.kind !== 'output') await invalidateSuggestions($)
     if (line) notePerson(line)
     if (row.kind === 'shell') {
       shellCommand = row.command
@@ -2329,15 +2507,55 @@ export const register: Register = on => {
     if (!isOn || e.props.hasSurvey) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const below = await next(e)
-    const together = (content: RenderElement) => (
+    const together = (content: RenderElement | null) => (
       <Box flexDirection="column">
         {content}
+        {navigation}
         {below}
       </Box>
     )
     const [{ ledger, prViews: prs, prFixesSent, lastActions, turns, stop, checks, settled, now }, presence, prev] =
       await Promise.all([drawnState($), read($, PRESENCE), read($, PREVIOUS)])
     const isWorking = e.props.isWorking
+    const suggestions = await read($, SUGGESTIONS)
+    const waiting = needsYouCount(ledger, checks, lastActions, turns)
+    const findingCount = ledger.findings.length
+    const prCount = Object.values(prs.views).reduce(
+      (n, pr) => n + prRowsOnYou(pr, handoffs(lastActions, prFixesSent)),
+      0,
+    )
+    const nextCount = (await read($, IS_DEMO)) ? 0 : suggestions.items.filter(i => !i.drafted).length
+    const badges: { tab: Tab; label: string; count: number }[] = [
+      { tab: 'needsYou', label: 'Needs you', count: waiting },
+      { tab: 'findings', label: 'Findings', count: findingCount },
+      { tab: 'prs', label: 'PRs', count: prCount },
+      { tab: 'nextSteps', label: 'Next steps', count: nextCount },
+    ]
+    const navigation = (
+      <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+        <Button
+          plain
+          key="inbox-open"
+          label="Inbox"
+          onPress={() =>
+            void openInboxTab(
+              $,
+              waiting ? 'needsYou' : findingCount ? 'findings' : nextCount ? 'nextSteps' : 'needsYou',
+            )
+          }
+        />
+        {badges
+          .filter(b => b.count > 0)
+          .map(b => (
+            <Button
+              plain
+              key={'inbox-' + b.tab}
+              label={b.label + ' ' + b.count}
+              onPress={() => void openInboxTab($, b.tab)}
+            />
+          ))}
+      </Box>
+    )
 
     // A stop is the one thing to act on, so it takes the band.
     if (stop) {
@@ -2402,7 +2620,7 @@ export const register: Register = on => {
 
     if (!card && ledger.items.length === 0 && ledger.findings.length === 0 && settled.length === 0) {
       // Before the session's first card, failed checks are all the band has to show.
-      if (isWorking || failedRows.length === 0) return below
+      if (isWorking || failedRows.length === 0) return together(null)
 
       return together(<Box flexDirection="column">{failedRows}</Box>)
     }
@@ -2414,18 +2632,7 @@ export const register: Register = on => {
     ))
 
     const goal = card?.goal || 'This session'
-    const waiting = needsYouCount(ledger, checks, lastActions, turns)
-    const findingCount = ledger.findings.length
-    const prAlert = prAttention(Object.values(prs.views), handoffs(lastActions, prFixesSent))
-    // The items themselves live in /inbox; the band only says how many wait.
-    const hints = [
-      ...settledHint,
-      waiting > 0 ? <Text color={NEEDS_YOU}> · {waiting} waiting on you in /inbox</Text> : null,
-      findingCount > 0 ? (
-        <Text color={FINDINGS}> · {findingCount === 1 ? '1 finding' : `${findingCount} findings`} in /inbox</Text>
-      ) : null,
-      prAlert ? <Text color={PRS}> · {prAlert}</Text> : null,
-    ]
+    const hints = settledHint
 
     if (isWorking) {
       return together(
@@ -2556,7 +2763,8 @@ export const register: Register = on => {
       !isDemo || !ResolvedInput ? ResolvedInput : props => ResolvedInput({ ...props, onSubmit: showSample })
     const card = ledger.card
     const prViews = Object.values(prState.views)
-    const pal = PALETTES[theme] ?? THEME_KEY_PALETTE
+    const suggestions = await read($, SUGGESTIONS)
+    const pal = oled && (theme === 'dark' || theme === '') ? OLED_PALETTE : (PALETTES[theme] ?? THEME_KEY_PALETTE)
     // `inverse: false` keeps the engine from inverting the line under the pointer inside the panel.
     const raise = {
       dimColor: false,
@@ -2870,13 +3078,48 @@ export const register: Register = on => {
       pr,
       rows: [...failingChecks(pr).map(c => checkRow(pr, c)), ...waitingThreads(pr).map(t => threadRow(pr, t))],
     }))
+    const suggestionRows: Row[] =
+      !isDemo && nextStepsEnabled
+        ? suggestions.items.map((item, n) => ({
+            id: item.id,
+            handle: item.drafted ? '✓' : '›',
+            handleTone: item.drafted ? 'done' : 'nextSteps',
+            title: item.label,
+            subtitle: item.drafted ? <Text color={pal.tone.done}>Added to draft</Text> : undefined,
+            body: (
+              <Text wrap="wrap" color={pal.muted}>
+                {item.prompt}
+              </Text>
+            ),
+            keys: () => [
+              {
+                key: 'draft-next-' + n,
+                label: item.drafted ? 'Added to draft' : 'Add to draft',
+                hotkey: 'a',
+                done: false,
+                onPress: () => void draftSuggestion($, item.id),
+              },
+            ],
+            moreKeys: () => [
+              {
+                key: 'drop-next-' + n,
+                label: 'Dismiss',
+                hotkey: 'x',
+                done: false,
+                onPress: () => void dismissSuggestion($, item.id),
+              },
+            ],
+          }))
+        : []
     const rows: Record<Tab, Row[]> = {
+      nextSteps: suggestionRows,
       needsYou: [...failedCheckRows, ...needsYouGroups.flatMap(g => g.rows)],
       findings: [...ledger.findings].reverse().map(findingRow),
       prs: prGroups.flatMap(g => g.rows),
     }
     // What each tab's count says waits on the person: a row handed to Claude waits on Claude.
     const tabCounts: Record<Tab, number> = {
+      nextSteps: suggestions.items.filter(i => !i.drafted).length,
       needsYou: needsYouCount(ledger, checks, lastActions, turns),
       findings: rows.findings.length,
       prs: prViews.reduce((n, pr) => n + prRowsOnYou(pr, handoff), 0),
@@ -3238,6 +3481,43 @@ export const register: Register = on => {
       )
     }
 
+    const nextStepsView = () => (
+      <Box flexDirection="column" flexGrow={1} gap={1}>
+        <Text color={pal.muted} wrap="wrap">
+          Optional next moves. Add one to your draft, then review and send.
+        </Text>
+        {suggestions.notice ? (
+          <Text wrap="wrap" color={suggestions.notice.startsWith('Added') ? pal.tone.done : pal.muted}>
+            {suggestions.notice}
+          </Text>
+        ) : null}
+        {suggestionRows.length
+          ? section(
+              divided(
+                suggestionRows.map(r => listRow(r)),
+                'next-steps',
+                false,
+              ),
+            )
+          : emptyState(
+              !nextStepsEnabled
+                ? 'Next steps are off'
+                : suggestions.status === 'loading'
+                  ? 'Thinking of useful next steps…'
+                  : suggestions.status === 'failed'
+                    ? 'No suggestions from this update'
+                    : suggestions.status === 'idle'
+                      ? 'No suggestions yet'
+                      : 'No next step needed',
+              !nextStepsEnabled
+                ? 'Enable Next steps in the Inbox plugin settings.'
+                : suggestions.status === 'failed'
+                  ? 'Inbox will try with the next reply. Your existing items are kept.'
+                  : 'Relevant suggestions appear after a reply. Finished work does not need extra tasks.',
+            )}
+      </Box>
+    )
+
     const newest = prViews.reduce((t, v) => Math.max(t, v.fetchedAt), 0)
     const status =
       tab === 'prs' && prViews.length > 0
@@ -3271,9 +3551,25 @@ export const register: Register = on => {
         justifyContent="space-between"
         columnGap={3}
       >
-        <Box flexDirection="row" columnGap={isInline ? 3 : 1}>
+        <Box flexDirection="row" flexWrap="wrap" columnGap={isInline ? 2 : 1}>
           {TABS.map(({ id, label }) => {
             const count = tabCounts[id]
+
+            if (pal === OLED_PALETTE && !isInline)
+              return (
+                <Box key={`tab-block-${id}`} backgroundColor={tab === id ? pal.raised : pal.body} paddingX={1}>
+                  <Box flexDirection="row" columnGap={1}>
+                    <Text color={tab === id ? pal.mark[id] : pal.muted}>{tab === id ? '▸' : '·'}</Text>
+                    <Button
+                      plain
+                      key={`tab-${id}`}
+                      label={label + (count > 0 ? ' ' + count : '')}
+                      hover={raise}
+                      onPress={() => void showTab($, id)}
+                    />
+                  </Box>
+                </Box>
+              )
 
             if (isInline)
               return (
@@ -3760,7 +4056,13 @@ export const register: Register = on => {
             It takes the unselected tabs' color, so they read as resting on it. */}
         {isInline ? null : <Text color={pal.tab ?? pal.divider}>{'▔'.repeat(e.props.bodyColumns)}</Text>}
         <Box flexDirection="column" paddingX={1} flexGrow={1}>
-          {tab === 'findings' ? findingsView() : tab === 'prs' ? prsView() : needsYouView()}
+          {tab === 'nextSteps'
+            ? nextStepsView()
+            : tab === 'findings'
+              ? findingsView()
+              : tab === 'prs'
+                ? prsView()
+                : needsYouView()}
         </Box>
         {footer}
         <Box display="none">

@@ -1,5 +1,20 @@
 {
   "name": "inbox",
-  "description": "Collects what is waiting on you in a session: questions, Claude's notes and PR reviews",
-  "types": "./types/index.d.ts"
+  "description": "Questions, findings, PR reviews and optional next-action drafts in one Inbox",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "appearance": {
+      "type": "string",
+      "title": "Inbox appearance",
+      "description": "OLED uses a black panel in dark themes. Follow theme keeps the original palette. Light themes always retain a readable light palette.",
+      "default": "oled",
+      "options": ["oled", "follow-theme"]
+    },
+    "nextSteps": {
+      "type": "boolean",
+      "title": "Next steps",
+      "description": "Include optional drafts in the existing bounded Inbox update. No separate model call.",
+      "default": true
+    }
+  }
 }

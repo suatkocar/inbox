@@ -255,7 +255,17 @@ export type Previous = {
   isBroughtIn: boolean
 }
 
-export type Tab = 'needsYou' | 'findings' | 'prs'
+export type Suggestion = { id: string; label: string; prompt: string; drafted: boolean }
+export type Suggestions = {
+  version: 1
+  sessionId: string
+  revision: number
+  status: 'idle' | 'loading' | 'ready' | 'failed'
+  items: Suggestion[]
+  dismissed: string[]
+  notice: string
+}
+export type Tab = 'needsYou' | 'findings' | 'prs' | 'nextSteps'
 
 /** A tab's selected row: its id, and its position for when that row goes away. */
 export type Cursor = { id: string | null; index: number }
@@ -272,6 +282,8 @@ declare module 'claude-code' {
       /** The Claude Code theme in use, such as `dark` or `light-ansi`; '' until read. */
       theme: string
       ledger: Ledger
+      /** Transient optional drafts; never part of the saved ledger or waiting count. */
+      suggestions: Suggestions
       presence: Presence
       previous: Previous | null
       tab: Tab
