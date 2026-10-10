@@ -252,7 +252,9 @@ export type Presence = {
 export type Previous = {
   savedAt: number
   ledger: Ledger
-  isBroughtIn: boolean
+  /** Feedback about a visible composer fill; never arms hidden prompt context. */
+  isDrafted: boolean
+  notice: string
 }
 
 export type Suggestion = { id: string; label: string; prompt: string; drafted: boolean }

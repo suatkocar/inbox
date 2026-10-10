@@ -32,6 +32,7 @@ import type {
   Stop,
   Tab,
 } from '../types'
+import { continuationDraft } from './continuation'
 import {
   checkName,
   checkRun,
@@ -942,30 +943,22 @@ async function appendContext($: EngineInterface, context: string[]) {
 
 /**
  * Records a prompt in the person's words and returns what Claude reads beside
- * it: the previous session's card when they continue from it, the questions a
- * numbered answer refers to, and the inbox when it changed.
+ * it: the questions a numbered answer refers to, and the inbox when it changed.
+ * A previous-session summary reaches Claude only through its visible draft.
  */
 async function notePrompt($: EngineInterface, text: string, sentBy: Press | null): Promise<string[]> {
   await invalidateSuggestions($)
-  const [now, ledger, prev, isShown] = await Promise.all([
+  const [now, ledger, isShown] = await Promise.all([
     $.clock.now(),
     update($, LEDGER, l => ({ ...l, turn: l.turn + 1 })),
-    read($, PREVIOUS),
     isPaneShown($),
   ])
   await Promise.all([
     update($, PRESENCE, p => ({ ...p, lastActiveAt: now, isAway: false })),
-    prev ? update($, PREVIOUS, () => null) : undefined,
+    update($, PREVIOUS, () => null),
   ])
   const notes: string[] = []
 
-  if (prev?.isBroughtIn) {
-    const carried = carryText(
-      prev.ledger,
-      `inbox: the user chose to continue from the previous session in this folder (${ago(now - prev.savedAt)}). Where it stood:`,
-    )
-    if (carried) notes.push(carried)
-  }
   const r = promptNotes(CLAUDE_CODE, ledger, { text, isPress: sentBy !== null, isOpen: isShown }, told)
   notes.push(...r.notes)
   told = r.told
@@ -1053,7 +1046,18 @@ function tilde(text: string): string {
 async function upgradeState($: EngineInterface): Promise<Ledger> {
   const [ledger] = await Promise.all([
     update($, LEDGER, upgradeLedger),
-    update($, PREVIOUS, p => p && { ...p, ledger: upgradeLedger(p.ledger) }),
+    update(
+      $,
+      PREVIOUS,
+      p =>
+        p && {
+          savedAt: p.savedAt,
+          ledger: upgradeLedger(p.ledger),
+          // Legacy isBroughtIn armed hidden context without filling the composer.
+          isDrafted: p.isDrafted ?? false,
+          notice: p.notice ?? '',
+        },
+    ),
     update($, TAB, t => ((t as string) === 'notes' ? 'findings' : (t as string) === 'waiting' ? 'needsYou' : t)),
     update($, SELECTION, ({ waiting, ...s }: Record<Tab, Cursor> & { waiting?: Cursor }) => ({
       ...NO_SELECTION,
@@ -1186,6 +1190,41 @@ async function draftSuggestion($: EngineInterface, id: string) {
     await notice('Draft could not be added. Try again from the message box.')
   } finally {
     drafting.delete(id)
+  }
+}
+
+/** Keep continuation explicit: append once, acknowledge only a successful fill. */
+async function draftPrevious($: EngineInterface, savedAt: number, at: number) {
+  const key = `previous:${at}:${savedAt}`
+  if (at !== conversation || drafting.has(key)) return
+  drafting.add(key)
+  const matches = (p: Previous | null): p is Previous => at === conversation && p?.savedAt === savedAt
+  const notice = (text: string, isDrafted = false) =>
+    update($, PREVIOUS, p => (matches(p) ? { ...p, notice: text, isDrafted } : p))
+  try {
+    const previous = await read($, PREVIOUS)
+    if (!matches(previous) || previous.isDrafted) return
+    if (isTurnRunning) {
+      await notice('Wait for this reply to finish before adding a draft.')
+      return
+    }
+    const text = continuationDraft(previous.ledger)
+    if (!text) return
+    const draft = await $.prompt.read()
+    if (isTurnRunning || !matches(await read($, PREVIOUS))) return
+    // A plugin reload can redisplay the card while its draft is still present.
+    if (!draft.text.includes(text)) {
+      const result = await $.prompt.fill({ text: (draft.text ? '\n\n' : '') + text, mode: 'append' })
+      if (!result.isFilled) {
+        await notice('Draft could not be added. Close any dialog, focus the message box and try again.')
+        return
+      }
+    }
+    await notice('Added to draft. Review it, then send when ready.', true)
+  } catch {
+    await notice('Draft could not be added. Try again from the message box.')
+  } finally {
+    drafting.delete(key)
   }
 }
 
@@ -2136,9 +2175,9 @@ async function loadConversation($: EngineInterface, id: string, isCleared: boole
       await update($, LEDGER, () => loaded)
       await update($, PRESENCE, p => ({ ...p, lastActiveAt: saved.savedAt, isAway: true }))
     } else if (!isCleared) {
-      const prev = (await $.store.get(`p:${root}`)) as Omit<Previous, 'isBroughtIn'> | undefined
+      const prev = (await $.store.get(`p:${root}`)) as Pick<Previous, 'savedAt' | 'ledger'> | undefined
       if (prev?.ledger.card && now - prev.savedAt < PREVIOUS_MAX_AGE_MS) {
-        await update($, PREVIOUS, () => ({ ...prev, ledger: upgradeLedger(prev.ledger), isBroughtIn: false }))
+        await update($, PREVIOUS, () => ({ ...prev, ledger: upgradeLedger(prev.ledger), isDrafted: false, notice: '' }))
       }
     }
   }
@@ -2534,9 +2573,9 @@ export const register: Register = (on, options) => {
     const navigation = (
       <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
         <Button
-          plain
           key="inbox-open"
           label="Inbox"
+          variant="primary"
           onPress={() =>
             void openInboxTab(
               $,
@@ -2548,7 +2587,6 @@ export const register: Register = (on, options) => {
           .filter(b => b.count > 0)
           .map(b => (
             <Button
-              plain
               key={'inbox-' + b.tab}
               label={b.label + ' ' + b.count}
               onPress={() => void openInboxTab($, b.tab)}
@@ -2570,6 +2608,7 @@ export const register: Register = (on, options) => {
     if (prev && ledger.turn === 0) {
       const c = prev.ledger.card
       const waiting = prev.ledger.items.length
+      const at = conversation
 
       return together(
         <Box flexDirection="column">
@@ -2590,18 +2629,17 @@ export const register: Register = (on, options) => {
             </Text>
           )}
           <Box flexDirection="row" gap={1}>
-            {prev.isBroughtIn ? (
-              <Text dimColor> Added to your next message.</Text>
-            ) : (
+            {!prev.isDrafted && (
               <Button
                 key="bring"
-                label="Continue from it"
+                label="Continue in draft"
                 variant="primary"
-                onPress={() => update($, PREVIOUS, p => (p ? { ...p, isBroughtIn: true } : p))}
+                onPress={() => draftPrevious($, prev.savedAt, at)}
               />
             )}
             <Button key="dismiss-prev" label="Dismiss" onPress={() => update($, PREVIOUS, () => null)} />
           </Box>
+          {prev.notice && <Text dimColor>{prev.notice}</Text>}
         </Box>,
       )
     }

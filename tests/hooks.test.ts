@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, RenderSurface } from 'claude-code'
+import { EMPTY } from '../hooks/ledger'
 
 const LEDGER_REPLY = `GOAL: Add a greeting CLI
 DONE: Plan written
@@ -27,6 +28,22 @@ let canFill = true
 let opened = 0
 let modelWait = async () => {}
 let fillWait = async () => {}
+let readWait = async () => {}
+
+const PREVIOUS_SESSION = {
+  savedAt: 900_000,
+  ledger: {
+    ...EMPTY,
+    turn: 3,
+    card: {
+      goal: 'Investigate terminal startup text',
+      done: ['Reported the upstream issue'],
+      now: 'Issue is open; nothing pending',
+      running: [],
+      updatedAt: 900_000,
+    },
+  },
+}
 
 // Prompts the mod sent as the person's own, as the engine's chain received them.
 let sent: string[] = []
@@ -82,7 +99,13 @@ const RUN_CHECK = 'mcp__inbox__run_check'
 // The apps drawing the session when it starts. A REPL start sets isInteractive instead.
 let surfaces: RenderSurface[] = []
 
-function world(on: On, prompts: string[], vars: Record<string, string> = {}, bandText?: string) {
+function world(
+  on: On,
+  prompts: string[],
+  vars: Record<string, string> = {},
+  bandText?: string,
+  stored: Record<string, unknown> = {},
+) {
   sent = []
   ran = []
   toolAnswer = { text: 'ok', isError: false }
@@ -95,8 +118,9 @@ function world(on: On, prompts: string[], vars: Record<string, string> = {}, ban
   opened = 0
   modelWait = async () => {}
   fillWait = async () => {}
+  readWait = async () => {}
   surfaces = []
-  mock.store(on)
+  mock.store(on, stored)
   on('session.surfaces', () => ({ value: surfaces }))
   on('session.attach', ($, e) => ({ clientId: e.clientId }))
   on('session.id', () => ({ value: 'session-1' }))
@@ -114,7 +138,10 @@ function world(on: On, prompts: string[], vars: Record<string, string> = {}, ban
   on('command.list', () => ({
     value: [{ name: 'review-tests', description: 'Review tests', source: 'plugin' as const }],
   }))
-  on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }))
+  on('prompt.read', async () => {
+    await readWait()
+    return { value: { text: draft, cursor: draft.length } }
+  })
   on('prompt.fill', async ($, e) => {
     await fillWait()
     if (canFill) {
@@ -185,6 +212,128 @@ test('the session card preserves another plugin below it while working and at re
   await band.redraw({ ...BAND.props, hasSurvey: true })
   expect(await band.find({ text: /Add a greeting CLI/ })).toBeUndefined()
   expect(await band.find({ text: 'Prompt Rail navigation' })).toBeDefined()
+})
+
+test('continuing a previous session visibly drafts its summary without sending or calling a model', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const prompts: string[] = []
+  world(on, prompts, {}, 'Prompt Rail navigation', { 'p:/tmp/project': PREVIOUS_SESSION })
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  expect(await band.find({ text: /Last session in this folder/ })).toBeDefined()
+  await band.press({ key: 'bring' })
+  expect(fills.length).toBe(1)
+  expect(fills[0]?.mode).toBe('append')
+  expect(draft).toContain('Continue from the previous session in this folder')
+  expect(draft).toContain('Goal: Investigate terminal startup text')
+  expect(draft).toContain('Done: Reported the upstream issue')
+  expect(draft).toContain('Now: Issue is open; nothing pending')
+  expect(await band.find({ text: /Added to draft/ })).toBeDefined()
+  expect(await band.find({ text: 'Prompt Rail navigation' })).toBeDefined()
+  expect(prompts).toEqual([])
+  expect(sent).toEqual([])
+})
+
+test('a continuation appends once while preserving text, images and concurrent edits', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [], {}, undefined, { 'p:/tmp/project': PREVIOUS_SESSION })
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  draft = 'My unfinished question [Image #3]'
+  fillWait = async () => {
+    draft += ' and one more detail'
+  }
+  await Promise.all([band.press({ key: 'bring' }), band.press({ key: 'bring' })])
+  expect(fills.length).toBe(1)
+  expect(draft).toContain('My unfinished question [Image #3] and one more detail\n\nContinue from')
+  expect(sent).toEqual([])
+})
+
+test('a refused continuation stays retryable and never claims that it was added', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [], {}, undefined, { 'p:/tmp/project': PREVIOUS_SESSION })
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  canFill = false
+  await band.press({ key: 'bring' })
+  expect(await band.find({ text: /Draft could not be added/ })).toBeDefined()
+  expect(await band.find({ text: /Added to draft/ })).toBeUndefined()
+  expect(draft).toBe('')
+  canFill = true
+  await band.press({ key: 'bring' })
+  expect(fills.length).toBe(1)
+  expect(await band.find({ text: /Added to draft/ })).toBeDefined()
+})
+
+test('deleting a continuation draft does not secretly attach the previous session to another message', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [], {}, undefined, { 'p:/tmp/project': PREVIOUS_SESSION })
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  await band.press({ key: 'bring' })
+  draft = ''
+  const result = await $.prompt.submit({
+    text: 'Help with an unrelated task.',
+    wait: false,
+    origin: { kind: 'composer' },
+  })
+  expect(JSON.stringify(result)).not.toContain('Investigate terminal startup text')
+  expect(await band.find({ text: /Last session in this folder/ })).toBeUndefined()
+})
+
+test('dismiss removes the previous-session card without changing the draft', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [], {}, undefined, { 'p:/tmp/project': PREVIOUS_SESSION })
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  draft = 'Keep this [Image #2]'
+  await band.press({ key: 'dismiss-prev' })
+  expect(draft).toBe('Keep this [Image #2]')
+  expect(fills).toEqual([])
+  expect(await band.find({ text: /Last session in this folder/ })).toBeUndefined()
+})
+
+for (const interruption of ['clear', 'dismiss', 'new-prompt'] as const) {
+  test(`${interruption} while the continuation reads the composer prevents a late append`, async ($, on) => {
+    mock.clock(on, { now: 1_000_000 })
+    world(on, [], {}, undefined, { 'p:/tmp/project': PREVIOUS_SESSION })
+    let reading!: () => void
+    let release!: () => void
+    const started = new Promise<void>(resolve => {
+      reading = resolve
+    })
+    readWait = () => {
+      reading()
+      return new Promise<void>(resolve => {
+        release = resolve
+      })
+    }
+    await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+    const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+    const adding = band.press({ key: 'bring' })
+    await started
+    if (interruption === 'clear')
+      await $.session.end({ reason: 'clear', sessionId: 'session-1', resume: { id: 'session-1' } })
+    else if (interruption === 'dismiss') await band.press({ key: 'dismiss-prev' })
+    else await $.prompt.submit({ text: 'A different task.', wait: false, origin: { kind: 'composer' } })
+    release()
+    await adding
+    expect(draft).toBe('')
+    expect(fills).toEqual([])
+  })
+}
+
+test('reloading does not append the same continuation summary twice', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [], {}, undefined, { 'p:/tmp/project': PREVIOUS_SESSION })
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  await band.press({ key: 'bring' })
+  const before = draft
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  await band.press({ key: 'bring' })
+  expect(fills.length).toBe(1)
+  expect(draft).toBe(before)
 })
 
 test('Inbox is clickable before any update and badges open the requested tab without submitting', async ($, on) => {

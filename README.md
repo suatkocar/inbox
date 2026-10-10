@@ -88,6 +88,16 @@ steps removes its generation instructions; normal Inbox tracking continues.
 After 15 minutes with no activity, or when you resume a session, the line
 above the prompt expands into a short summary of where things stand.
 
+On a fresh conversation, **Last session in this folder** can show the latest
+saved summary for that folder, up to seven days old. **Continue in draft** puts
+a continuation message and that summary visibly in the message box. It appends
+to existing text and image references, and never sends automatically. Review
+the draft and press Enter when ready. This uses the saved summary in the new
+conversation; it does not reopen the old transcript. It makes no model call.
+If adding the draft fails, the card shows a retryable notice. Deleting the draft
+leaves no hidden continuation attached to your next message. **Dismiss** hides
+the card without changing the message box, including a draft already added.
+
 Claude runs each test or build as a command of its own, so the mod knows
 exactly how it ended. If Claude says something passes when the last run
 failed, or hasn't run since an edit, the mod asks Claude to run it again or
