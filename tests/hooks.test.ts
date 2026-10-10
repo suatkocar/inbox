@@ -76,7 +76,7 @@ const RUN_CHECK = 'mcp__inbox__run_check'
 // The apps drawing the session when it starts. A REPL start sets isInteractive instead.
 let surfaces: RenderSurface[] = []
 
-function world(on: On, prompts: string[], vars: Record<string, string> = {}) {
+function world(on: On, prompts: string[], vars: Record<string, string> = {}, bandText?: string) {
   sent = []
   ran = []
   toolAnswer = { text: 'ok', isError: false }
@@ -134,8 +134,29 @@ function world(on: On, prompts: string[], vars: Record<string, string> = {}) {
   // The engine asks the person, as for a file outside the project.
   on('tool.check', () => ({ decision: 'ask' as const }))
   // The band with nothing to show falls through to the engine's own, drawn empty here.
-  on('ui.render', ($, e) => $.ui.resolve(e).Box({}))
+  on('ui.render', ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    return e.component === 'AbovePrompt' && bandText ? Text({ children: bandText }) : Box({})
+  })
 }
+
+test('the session card preserves another plugin below it while working and at rest', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  world(on, [], {}, 'Prompt Rail navigation')
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: 'add a greeting cli', wait: false, origin: { kind: 'composer' } })
+  await $.turn.complete({ answer: 'Plan ready.', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.settle()
+  const band = await $.ui.mount({ plugin: 'inbox', surface: 'terminal', ...BAND })
+  expect(await band.find({ text: /2 waiting on you in \/inbox/ })).toBeDefined()
+  expect(await band.find({ text: 'Prompt Rail navigation' })).toBeDefined()
+  await band.redraw({ ...BAND.props, isWorking: true })
+  expect(await band.find({ text: /Add a greeting CLI/ })).toBeDefined()
+  expect(await band.find({ text: 'Prompt Rail navigation' })).toBeDefined()
+  await band.redraw({ ...BAND.props, hasSurvey: true })
+  expect(await band.find({ text: /Add a greeting CLI/ })).toBeUndefined()
+  expect(await band.find({ text: 'Prompt Rail navigation' })).toBeDefined()
+})
 
 /** The sidebar lines the mod published to Herdr, in order. */
 function sidebarLines(): string[] {

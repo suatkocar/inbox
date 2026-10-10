@@ -1,5 +1,12 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, SessionAppendMessage, UiPressArgument, UiScrollResult } from 'claude-code'
+import type {
+  EngineInterface,
+  Register,
+  RenderElement,
+  SessionAppendMessage,
+  UiPressArgument,
+  UiScrollResult,
+} from 'claude-code'
 
 import type {
   Arrival,
@@ -2321,17 +2328,24 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!isOn || e.props.hasSurvey) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
+    const below = await next(e)
+    const together = (content: RenderElement) => (
+      <Box flexDirection="column">
+        {content}
+        {below}
+      </Box>
+    )
     const [{ ledger, prViews: prs, prFixesSent, lastActions, turns, stop, checks, settled, now }, presence, prev] =
       await Promise.all([drawnState($), read($, PRESENCE), read($, PREVIOUS)])
     const isWorking = e.props.isWorking
 
     // A stop is the one thing to act on, so it takes the band.
     if (stop) {
-      return (
+      return together(
         <Text wrap="truncate-end">
           <Text color="error">! Stopped {ago(now - stop.at)}: </Text>
           {stopText(stop)}. <Text dimColor>{stopFix(stop)}</Text>
-        </Text>
+        </Text>,
       )
     }
 
@@ -2339,7 +2353,7 @@ export const register: Register = on => {
       const c = prev.ledger.card
       const waiting = prev.ledger.items.length
 
-      return (
+      return together(
         <Box flexDirection="column">
           <Text bold>
             Last session in this folder <Text dimColor>· {ago(now - prev.savedAt)}</Text>
@@ -2370,7 +2384,7 @@ export const register: Register = on => {
             )}
             <Button key="dismiss-prev" label="Dismiss" onPress={() => update($, PREVIOUS, () => null)} />
           </Box>
-        </Box>
+        </Box>,
       )
     }
 
@@ -2388,9 +2402,9 @@ export const register: Register = on => {
 
     if (!card && ledger.items.length === 0 && ledger.findings.length === 0 && settled.length === 0) {
       // Before the session's first card, failed checks are all the band has to show.
-      if (isWorking || failedRows.length === 0) return next(e)
+      if (isWorking || failedRows.length === 0) return below
 
-      return <Box flexDirection="column">{failedRows}</Box>
+      return together(<Box flexDirection="column">{failedRows}</Box>)
     }
     const settledHint = settled.map(s => (
       <Text color={DONE}>
@@ -2414,13 +2428,13 @@ export const register: Register = on => {
     ]
 
     if (isWorking) {
-      return (
+      return together(
         <Text wrap="truncate-end">
           <Text color={ACCENT}>◆ </Text>
           <Text dimColor>{goal}</Text>
           {settledHint}
           {waiting > 0 ? <Text color={NEEDS_YOU}> · {waiting} waiting on you</Text> : null}
-        </Text>
+        </Text>,
       )
     }
 
@@ -2470,10 +2484,10 @@ export const register: Register = on => {
           : []),
       ]
 
-      return <Box flexDirection="column">{rows.slice(0, Math.max(1, e.props.maxRows))}</Box>
+      return together(<Box flexDirection="column">{rows.slice(0, Math.max(1, e.props.maxRows))}</Box>)
     }
 
-    return (
+    return together(
       <Box flexDirection="column">
         <Text wrap="truncate-end">
           <Text color={ACCENT}>◆ </Text>
@@ -2485,7 +2499,7 @@ export const register: Register = on => {
         </Text>
         {failedRows}
         {openRows}
-      </Box>
+      </Box>,
     )
   })
 

@@ -107,6 +107,11 @@ your usage limits.
 
 ## Developing
 
+The above-prompt status composes with other mods, including Prompt Rail and
+Image View. Stopped, working and returning-session states keep their content
+visible too; surveys still take priority. This changes no ledger model prompt,
+saved-state format or check-tracking behavior.
+
 Run the mod from a clone:
 
 ```sh
