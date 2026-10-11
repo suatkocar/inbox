@@ -178,6 +178,10 @@ const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 const CHECKS = atom({ plugin: 'inbox', key: 'checks' } as const, NO_CHECKS)
 const SNAPSHOTS = atom({ plugin: 'inbox', key: 'snapshots' } as const, {} as Record<string, Snapshot>)
 const TYPING = atom({ plugin: 'inbox', key: 'typing' } as const, null as string | null)
+const REPLY_DRAFTS = atom({ plugin: 'inbox', key: 'replyDrafts' } as const, {
+  sessionId: '',
+  texts: {} as Record<string, string>,
+})
 const SETTLED = atom({ plugin: 'inbox', key: 'settled' } as const, [] as Settled[])
 const ARRIVAL = atom({ plugin: 'inbox', key: 'arrival' } as const, null as Arrival | null)
 const LAST_ACTIONS = atom({ plugin: 'inbox', key: 'lastActions' } as const, {} as Record<string, LastAction>)
@@ -1254,6 +1258,16 @@ async function startTyping($: EngineInterface, id: string) {
   await $.ui.focus({ requestId: PANE, key: `type-${id}` }).catch(() => undefined)
 }
 
+/** Keeps a row's unsent words through redraws, resizing and closing the pane. */
+async function setReplyDraft($: EngineInterface, id: string, text: string) {
+  await update($, REPLY_DRAFTS, drafts => {
+    const texts = { ...drafts.texts }
+    if (text) texts[id] = text
+    else delete texts[id]
+    return { ...drafts, texts }
+  })
+}
+
 /**
  * Sends the person's own words about an item as their message. A question
  * closes with those words as its answer, as an option press does. A task
@@ -2150,6 +2164,7 @@ async function turnOn($: EngineInterface) {
  */
 async function loadConversation($: EngineInterface, id: string, isCleared: boolean) {
   conversation++
+  await update($, REPLY_DRAFTS, drafts => (drafts.sessionId === id ? drafts : { sessionId: id, texts: {} }))
   await update($, SUMMARY_OPEN, () => false)
   await invalidateSuggestions($, true, id)
   sessionId = id
@@ -2872,6 +2887,7 @@ export const register: Register = (on, options) => {
       selection,
       theme,
       typing,
+      replyDrafts,
       unfolded,
       isKeyListShown,
       shownDetails,
@@ -2884,6 +2900,7 @@ export const register: Register = (on, options) => {
       read($, SELECTION),
       read($, THEME),
       read($, TYPING),
+      read($, REPLY_DRAFTS),
       read($, UNFOLDED),
       read($, IS_KEY_LIST_SHOWN),
       read($, SHOWN_DETAILS),
@@ -3538,13 +3555,23 @@ export const register: Register = (on, options) => {
                     : [keyRow(keys), keyRow(more)]}
               </Box>
               {Input && row.onType && typing === row.id ? (
-                <Box marginTop={blankLine}>
+                <Box flexDirection="column" marginTop={blankLine}>
+                  {/* Input is one line in the host. Keep the whole draft readable beside its editor. */}
+                  {replyDrafts.texts[row.id] ? (
+                    <Box flexDirection="column" marginBottom={blankLine}>
+                      <Text color={pal.muted}>Full draft</Text>
+                      <Text wrap="wrap">{replyDrafts.texts[row.id]}</Text>
+                    </Box>
+                  ) : null}
                   <Input
                     key={`type-${row.id}`}
                     placeholder={row.typeHint}
+                    value={replyDrafts.texts[row.id] ?? ''}
                     submitLabel="send"
                     autoFocus
-                    onSubmit={(value: string) => {
+                    onInput={(value: string) => setReplyDraft($, row.id, value)}
+                    onSubmit={async (value: string) => {
+                      await setReplyDraft($, row.id, '')
                       const typed = row.onType
                       typed?.send(value)
                       if (typed?.done && value.trim())

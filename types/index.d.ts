@@ -302,6 +302,8 @@ declare module 'claude-code' {
       snapshots: Record<string, Snapshot>
       /** The row whose free-text field is open, if any. */
       typing: string | null
+      /** Unsent row replies for the current conversation; never written to the plugin store. */
+      replyDrafts: { sessionId: string; texts: Record<string, string> }
       /** Items that just closed, and checks that just passed, shown in place for a few seconds. */
       settled: Settled[]
       /** The pane's latest jump to a new row. */
