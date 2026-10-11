@@ -33,6 +33,7 @@ import type {
   Tab,
 } from '../types'
 import { continuationDraft } from './continuation'
+import { MAX_REPLY_LENGTH } from './reply-text'
 import {
   checkName,
   checkRun,
@@ -1250,17 +1251,18 @@ async function openInboxTab($: EngineInterface, tab: Tab) {
   await jumpTo($, tab, ids[0] ? { id: ids[0], index: 0 } : null)
 }
 
-/** Opens the free-text field under a row and gives it the keyboard. */
-async function startTyping($: EngineInterface, id: string) {
+/** Opens the free-text field; a Client editor takes keyboard focus on click. */
+async function startTyping($: EngineInterface, id: string, focusInput = true) {
   await update($, TYPING, () => id)
   // A click leaves the keys with the prompt, and `ui.focus` is refused in a pane that lacks them.
   await openPane($)
-  await $.ui.focus({ requestId: PANE, key: `type-${id}` }).catch(() => undefined)
+  if (focusInput) await $.ui.focus({ requestId: PANE, key: `type-${id}` }).catch(() => undefined)
 }
 
 /** Keeps a row's unsent words through redraws, resizing and closing the pane. */
-async function setReplyDraft($: EngineInterface, id: string, text: string) {
+async function setReplyDraft($: EngineInterface, id: string, text: string, forSession = sessionId) {
   await update($, REPLY_DRAFTS, drafts => {
+    if (drafts.sessionId !== forSession) return drafts
     const texts = { ...drafts.texts }
     if (text) texts[id] = text
     else delete texts[id]
@@ -1792,7 +1794,12 @@ const CHOICE_KEYS = [...'abcfghilm']
  * and Done for a task. `more` are the other ways to respond: your own words,
  * Explain, and Dismiss for a question.
  */
-function itemKeys($: EngineInterface, item: Item, helpSteps: HelpStep[]): { keys: KeyAction[]; more: KeyAction[] } {
+function itemKeys(
+  $: EngineInterface,
+  item: Item,
+  helpSteps: HelpStep[],
+  focusInput = true,
+): { keys: KeyAction[]; more: KeyAction[] } {
   const lettered = [...(item.kind === 'task' ? [] : answerActions($, item)), ...helpActions($, item, helpSteps)]
     .slice(0, CHOICE_KEYS.length)
     .map((a, n) => ({ ...a, hotkey: CHOICE_KEYS[n]! }))
@@ -1808,7 +1815,7 @@ function itemKeys($: EngineInterface, item: Item, helpSteps: HelpStep[]): { keys
     label: item.kind === 'task' ? 'Type a reply' : 'Type an answer',
     hotkey: 't',
     done: false,
-    onPress: () => void startTyping($, item.id),
+    onPress: () => void startTyping($, item.id, focusInput),
   }
   if (item.kind === 'task')
     return { keys: [...lettered, { ...doneAction($, item), hotkey: 'd' }], more: [typeKey, explainKey] }
@@ -2560,6 +2567,64 @@ export const register: Register = (on, options) => {
     return r
   })
 
+  on('ui.message', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const at = conversation
+    const data = e.data as { kind?: unknown; rowId?: unknown; sessionId?: unknown; text?: unknown } | null
+    if (
+      !data ||
+      typeof data.rowId !== 'string' ||
+      typeof data.text !== 'string' ||
+      data.sessionId !== sessionId ||
+      e.element !== `reply-${data.rowId}` ||
+      !['change', 'submit', 'cancel'].includes(String(data.kind)) ||
+      data.text.length > MAX_REPLY_LENGTH
+    )
+      return {}
+    const isCurrent = () => at === conversation && data.sessionId === sessionId
+    if (await read($, IS_DEMO)) {
+      if (data.kind === 'submit') await $.ui.toast(SAMPLE_PRESS)
+      return {}
+    }
+    if ((await read($, TYPING)) !== data.rowId || !isCurrent()) return {}
+    await setReplyDraft($, data.rowId, data.text, data.sessionId as string)
+    if (!isCurrent()) return {}
+    if (data.kind === 'change') return {}
+    if (data.kind === 'cancel') {
+      await update($, TYPING, id => (isCurrent() && id === data.rowId ? null : id))
+      return {}
+    }
+    if (!data.text.trim()) return {}
+    const { ledger, checks, prViews } = await drawnState($)
+    if (!isCurrent()) return {}
+    const item = ledger.items.find(i => i.id === data.rowId)
+    const finding = ledger.findings.find(f => f.id === data.rowId)
+    if (!item && !finding) return {}
+    let claimed = false
+    await update($, TYPING, id => {
+      if (id !== data.rowId || !isCurrent()) return id
+      claimed = true
+      return null
+    })
+    if (!claimed || !isCurrent()) return {}
+    const tab = await read($, TAB)
+    if (!isCurrent()) return {}
+    const index = tabRowIds(ledger, checks, Object.values(prViews.views))[tab].indexOf(data.rowId)
+    if (item) await sendTypedForItem($, item, data.text)
+    else await sendTypedForFinding($, finding!, data.text)
+    if (!isCurrent()) return {}
+    await setReplyDraft($, data.rowId, '', data.sessionId as string)
+    if (finding || item?.kind === 'task')
+      await recordLastAction($, data.rowId, {
+        action: 'typed',
+        text: 'Reply',
+        isHandoff: item?.kind === 'task',
+        tab,
+        title: item?.ask ?? finding!.title,
+        index,
+      })
+    return {}
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!isOn || e.props.hasSurvey) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
@@ -2876,6 +2941,7 @@ export const register: Register = (on, options) => {
     const { Box, Button: ResolvedButton, Markdown, Text } = elements
     // The mobile app draws no text field, so there the typed reply is not offered.
     const ResolvedInput = 'Input' in elements ? elements.Input : null
+    const Client = e.surface === 'terminal' && 'Client' in elements ? elements.Client : null
     // Inline above the prompt, the pane takes its room from the conversation, so
     // it drops the section cards, the tab panels and the blank lines between parts.
     const isInline = e.props.placement === 'inline'
@@ -2976,8 +3042,8 @@ export const register: Register = (on, options) => {
         titleAfter: asked,
         hasSecondLine: item.kind === 'question',
         body: null,
-        keys: () => itemKeys($, item, itemSteps(item, prState, ledger.prs)).keys,
-        moreKeys: () => itemKeys($, item, itemSteps(item, prState, ledger.prs)).more,
+        keys: () => itemKeys($, item, itemSteps(item, prState, ledger.prs), !Client).keys,
+        moreKeys: () => itemKeys($, item, itemSteps(item, prState, ledger.prs), !Client).more,
         // A question closes on its typed answer; a task stays open.
         onType: {
           done: item.kind === 'task' ? 'Reply' : null,
@@ -3027,7 +3093,7 @@ export const register: Register = (on, options) => {
           label: 'Type a reply',
           hotkey: 't',
           done: false,
-          onPress: () => void startTyping($, finding.id),
+          onPress: () => void startTyping($, finding.id, !Client),
         },
         {
           key: `discuss-${finding.id}`,
@@ -3556,35 +3622,45 @@ export const register: Register = (on, options) => {
               </Box>
               {Input && row.onType && typing === row.id ? (
                 <Box flexDirection="column" marginTop={blankLine}>
-                  {/* Input is one line in the host. Keep the whole draft readable beside its editor. */}
-                  {replyDrafts.texts[row.id] ? (
-                    <Box flexDirection="column" marginBottom={blankLine}>
-                      <Text color={pal.muted}>Full draft</Text>
-                      <Text wrap="wrap">{replyDrafts.texts[row.id]}</Text>
-                    </Box>
-                  ) : null}
-                  <Input
-                    key={`type-${row.id}`}
-                    placeholder={row.typeHint}
-                    value={replyDrafts.texts[row.id] ?? ''}
-                    submitLabel="send"
-                    autoFocus
-                    onInput={(value: string) => setReplyDraft($, row.id, value)}
-                    onSubmit={async (value: string) => {
-                      await setReplyDraft($, row.id, '')
-                      const typed = row.onType
-                      typed?.send(value)
-                      if (typed?.done && value.trim())
-                        void recordLastAction($, row.id, {
-                          action: 'typed',
-                          text: typed.done,
-                          isHandoff: typed.handsOff === true,
-                          tab,
-                          title: row.title,
-                          index,
-                        })
-                    }}
-                  />
+                  {Client ? (
+                    <Client
+                      key={`reply-${row.id}`}
+                      module="./reply-editor.tsx"
+                      width="100%"
+                      props={{
+                        sessionId,
+                        rowId: row.id,
+                        value: replyDrafts.texts[row.id] ?? '',
+                        columns: e.props.bodyColumns - (tree ? 8 : 6),
+                        accent: pal.key,
+                        muted: pal.muted,
+                        demo: isDemo,
+                      }}
+                    />
+                  ) : (
+                    <Input
+                      key={`type-${row.id}`}
+                      placeholder={row.typeHint}
+                      value={replyDrafts.texts[row.id] ?? ''}
+                      submitLabel="send"
+                      autoFocus
+                      onInput={(value: string) => setReplyDraft($, row.id, value)}
+                      onSubmit={async (value: string) => {
+                        await setReplyDraft($, row.id, '')
+                        const typed = row.onType
+                        typed?.send(value)
+                        if (typed?.done && value.trim())
+                          void recordLastAction($, row.id, {
+                            action: 'typed',
+                            text: typed.done,
+                            isHandoff: typed.handsOff === true,
+                            tab,
+                            title: row.title,
+                            index,
+                          })
+                      }}
+                    />
+                  )}
                 </Box>
               ) : null}
             </Box>

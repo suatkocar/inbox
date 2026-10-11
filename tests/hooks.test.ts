@@ -97,6 +97,35 @@ const PANE = {
 
 const RUN_CHECK = 'mcp__inbox__run_check'
 
+test('terminal replies use one editable wrapped field instead of a duplicate preview', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [])
+  on('ui.focus', () => ({}))
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  await $.tool.call({
+    tool: 'mcp__inbox__record_finding',
+    kind: 'issue',
+    title: 'Check the timeout',
+    detail: 'Retry timed out.',
+  })
+  const pane = await $.ui.mount(PANE)
+  await pane.press({ key: 'tab-findings' })
+  await pane.press({ key: 'typekey-f1' })
+  expect(await pane.find({ type: 'Client', key: 'reply-f1' })).toBeDefined()
+  expect(await pane.find({ type: 'Input', key: 'type-f1' })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: 'Full draft' })).toBeUndefined()
+  await pane.resize({ columns: 28, rows: 8, in: 'reply-f1' })
+  await pane.key({ key: 'Please check this issue before making any changes. Türkçe: ğış İ 👩🏽‍💻.', in: 'reply-f1' })
+  expect(sent).toHaveLength(0)
+  await pane.key({ key: 'return', shift: true, in: 'reply-f1' })
+  await pane.key({ key: 'Keep the draft in this field.', in: 'reply-f1' })
+  await pane.key({ key: 'return', in: 'reply-f1' })
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toBe(
+    'About this finding you recorded:\nIssue: Check the timeout\nRetry timed out.\n\nPlease check this issue before making any changes. Türkçe: ğış İ 👩🏽‍💻.\nKeep the draft in this field.',
+  )
+})
+
 // The apps drawing the session when it starts. A REPL start sets isInteractive instead.
 let surfaces: RenderSurface[] = []
 
@@ -949,16 +978,17 @@ test('t opens a field for the person’s own words: an answer closes its questio
   const pane = await $.ui.mount(PANE)
   expect(await pane.find({ key: 'type-i1' })).toBeUndefined()
   await pane.press({ key: 'typekey-i1' })
-  await pane.input({ key: 'type-i1', text: 'Deno, actually', kind: 'change' })
-  expect((await pane.find({ type: 'Text', text: 'Deno, actually' }))?.text).toBe('Deno, actually')
+  await pane.key({ key: 'Deno, actually', in: 'reply-i1' })
+  expect(await pane.find({ type: 'Client', key: 'reply-i1' })).toBeDefined()
   expect(sent).toHaveLength(0)
-  await pane.input({ key: 'type-i1', text: 'Deno, actually' })
+  await pane.key({ key: 'return', in: 'reply-i1' })
   expect(sent.at(-1)).toBe('Re "Use Node or Python?": Deno, actually')
   expect(await pane.find({ key: 'row-i1' })).toBeUndefined()
 
   await pane.press({ key: 'tab-findings' })
   await pane.press({ key: 'typekey-f3' })
-  await pane.input({ key: 'type-f3', text: 'Fix it after the CLI ships.' })
+  await pane.key({ key: 'Fix it after the CLI ships.', in: 'reply-f3' })
+  await pane.key({ key: 'return', in: 'reply-f3' })
   expect(sent.at(-1)).toBe(
     'About this finding you recorded:\nIssue: README is stale\nIt names the old command.\n\nFix it after the CLI ships.',
   )
@@ -986,26 +1016,25 @@ for (const placement of ['dock', 'inline'] as const) {
     await pane.press({ key: 'typekey-f1' })
     const text =
       'Please check the retry limit before changing the implementation. '.repeat(4) + '\nKeep Unicode intact: ğış İ 👩🏽‍💻.'
-    await pane.input({ key: 'type-f1', text, kind: 'change' })
-    const preview = await pane.find({ type: 'Text', text })
-    expect(preview?.text).toBe(text)
-    expect(preview?.props.wrap).toBe('wrap')
+    await pane.resize({ columns: 26, rows: 8, in: 'reply-f1' })
+    await pane.key({ key: text, in: 'reply-f1' })
+    expect(await pane.find({ type: 'Input' })).toBeUndefined()
+    expect(await pane.find({ text: 'Full draft' })).toBeUndefined()
     expect(sent).toHaveLength(0)
-
     await pane.redraw({ ...props, bodyColumns: 50 })
-    expect((await pane.find({ type: 'Text', text }))?.text).toBe(text)
-    expect((await pane.find({ key: 'type-f1' }))?.props.value).toBe(text)
+    await pane.resize({ columns: 44, rows: 8, in: 'reply-f1' })
     await pane.press({ key: 'pane-close' })
     await $.command.run({ command: 'inbox', args: '' } as never)
     await pane.press({ key: 'typekey-f1' })
-    expect((await pane.find({ key: 'type-f1' }))?.props.value).toBe(text)
-
-    const revised = 'Check only the timeout.'
-    await pane.input({ key: 'type-f1', text: revised, kind: 'change' })
-    expect((await pane.find({ type: 'Text', text: revised }))?.text).toBe(revised)
-    await pane.input({ key: 'type-f1', text: '', kind: 'change' })
-    expect(await pane.find({ type: 'Text', text: 'Full draft' })).toBeUndefined()
-    await pane.input({ key: 'type-f1', text, kind: 'submit' })
+    expect(((await pane.find({ type: 'Client', key: 'reply-f1' }))?.props.props as { value: string }).value).toBe(text)
+    await pane.key({ key: 'a', ctrl: true, in: 'reply-f1' })
+    await pane.key({ key: 'Check only the timeout.', in: 'reply-f1' })
+    await pane.key({ key: 'a', ctrl: true, in: 'reply-f1' })
+    await pane.key({ key: 'backspace', in: 'reply-f1' })
+    await pane.key({ key: 'return', in: 'reply-f1' })
+    expect(sent).toHaveLength(0)
+    await pane.key({ key: text, in: 'reply-f1' })
+    await pane.press({ key: 'send-reply' })
     expect(sent).toHaveLength(1)
     expect(sent[0]).toBe(
       'About this finding you recorded:\nIssue: Retry limit is missing\nRepeated requests continue after a timeout.\n\n' +
@@ -1014,6 +1043,105 @@ for (const placement of ['dock', 'inline'] as const) {
     expect(await pane.find({ type: 'Text', text: 'Full draft' })).toBeUndefined()
   })
 }
+
+test('the reply editor supports selection, undo, pointer placement and a scrolling caret in the same field', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [])
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  await $.tool.call({
+    tool: 'mcp__inbox__record_finding',
+    kind: 'issue',
+    title: 'Check retry behavior',
+    detail: 'A request timed out.',
+  })
+  const pane = await $.ui.mount(PANE)
+  await pane.press({ key: 'tab-findings' })
+  await pane.press({ key: 'typekey-f1' })
+  await pane.resize({ columns: 28, rows: 8, in: 'reply-f1' })
+  const value = async () =>
+    ((await pane.find({ type: 'Client', key: 'reply-f1' }))?.props.props as { value: string }).value
+  await pane.key({ key: 'one two\nthree four', in: 'reply-f1' })
+  await pane.key({ key: 'home', ctrl: true, in: 'reply-f1' })
+  await pane.key({ key: 'right', ctrl: true, in: 'reply-f1' })
+  await pane.key({ key: 'right', ctrl: true, shift: true, in: 'reply-f1' })
+  await pane.key({ key: 'next\n', in: 'reply-f1' })
+  expect(await value()).toBe('one next\nthree four')
+  await pane.key({ key: 'z', ctrl: true, in: 'reply-f1' })
+  expect(await value()).toBe('one two\nthree four')
+  await pane.key({ key: 'z', ctrl: true, shift: true, in: 'reply-f1' })
+  expect(await value()).toBe('one next\nthree four')
+  await pane.pointer({ type: 'down', button: 'left', x: 2, y: 2, in: 'reply-f1' })
+  await pane.pointer({ type: 'move', button: 'left', x: 7, y: 2, in: 'reply-f1' })
+  await pane.pointer({ type: 'up', button: 'left', x: 7, y: 2, in: 'reply-f1' })
+  await pane.key({ key: 'five', in: 'reply-f1' })
+  expect(await value()).toBe('one next\nfive four')
+  await pane.key({ key: 'a', ctrl: true, in: 'reply-f1' })
+  const long = Array.from({ length: 18 }, (_, i) => `Line ${i + 1}`).join('\n')
+  await pane.key({ key: long, in: 'reply-f1' })
+  expect(await pane.find({ text: 'Lines 7–18 of 18 · ↑ ↓', in: 'reply-f1' })).toBeDefined()
+  await pane.key({ key: 'home', ctrl: true, in: 'reply-f1' })
+  expect(await pane.find({ text: 'Lines 1–12 of 18 · ↑ ↓', in: 'reply-f1' })).toBeDefined()
+  await pane.key({ key: 'x'.repeat(20_001), in: 'reply-f1' })
+  expect(await value()).toBe(long)
+  expect(await pane.find({ text: /Your draft is unchanged/, in: 'reply-f1' })).toBeDefined()
+  await pane.press({ key: 'save-reply' })
+  expect(await pane.find({ type: 'Client', key: 'reply-f1' })).toBeUndefined()
+  await pane.press({ key: 'typekey-f1' })
+  expect(await value()).toBe(long)
+  expect(sent).toEqual([])
+})
+
+test('reply posts from another conversation or row cannot replace or send the active draft', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [])
+  await $.session.start({ cwd: '/tmp/project', surface: 'terminal', isInteractive: true })
+  await $.tool.call({
+    tool: 'mcp__inbox__record_finding',
+    kind: 'issue',
+    title: 'Check retry behavior',
+    detail: 'A request timed out.',
+  })
+  const pane = await $.ui.mount(PANE)
+  await pane.press({ key: 'tab-findings' })
+  await pane.press({ key: 'typekey-f1' })
+  await pane.key({ key: 'Keep these words.', in: 'reply-f1' })
+  const props = (await pane.find({ type: 'Client', key: 'reply-f1' }))!.props.props as {
+    sessionId: string
+    value: string
+  }
+  await pane.post(
+    { kind: 'submit', rowId: 'f1', sessionId: 'another-conversation', text: 'Stale text' },
+    { in: 'reply-f1' },
+  )
+  await pane.post({ kind: 'change', rowId: 'f2', sessionId: props.sessionId, text: 'Wrong row' }, { in: 'reply-f1' })
+  expect(((await pane.find({ type: 'Client', key: 'reply-f1' }))!.props.props as { value: string }).value).toBe(
+    'Keep these words.',
+  )
+  expect(sent).toEqual([])
+})
+
+test('desktop replies retain their native input without a duplicate preview', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  world(on, [])
+  on('ui.focus', () => ({}))
+  await $.session.start({ cwd: '/tmp/project', surface: 'desktop', isInteractive: true })
+  await $.tool.call({
+    tool: 'mcp__inbox__record_finding',
+    kind: 'issue',
+    title: 'Check retry behavior',
+    detail: 'A request timed out.',
+  })
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'tab-findings' })
+  await pane.press({ key: 'typekey-f1' })
+  expect(await pane.find({ type: 'Input', key: 'type-f1' })).toBeDefined()
+  expect(await pane.find({ type: 'Client' })).toBeUndefined()
+  await pane.input({ key: 'type-f1', text: 'Please check it.', kind: 'change' })
+  expect(await pane.find({ text: 'Full draft' })).toBeUndefined()
+  await pane.input({ key: 'type-f1', text: 'Please check it.' })
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toContain('Please check it.')
+})
 
 test('task drafts stay separate between rows and are cleared after sending or switching conversations', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
@@ -1033,20 +1161,22 @@ test('task drafts stay separate between rows and are cleared after sending or sw
   await clock.settle()
   const pane = await $.ui.mount(PANE)
   await pane.press({ key: 'typekey-i1' })
-  await pane.input({ key: 'type-i1', text: 'I will check the copy tomorrow.', kind: 'change' })
+  await pane.key({ key: 'I will check the copy tomorrow.', in: 'reply-i1' })
   await pane.press({ key: 'select-i2' })
   await pane.press({ key: 'typekey-i2' })
-  expect((await pane.find({ key: 'type-i2' }))?.props.value).toBe('')
-  await pane.input({ key: 'type-i2', text: 'The mobile screenshots need another pass.', kind: 'change' })
+  expect(((await pane.find({ type: 'Client', key: 'reply-i2' }))?.props.props as { value: string }).value).toBe('')
+  await pane.key({ key: 'The mobile screenshots need another pass.', in: 'reply-i2' })
   await pane.press({ key: 'select-i1' })
   await pane.press({ key: 'typekey-i1' })
-  expect((await pane.find({ key: 'type-i1' }))?.props.value).toBe('I will check the copy tomorrow.')
-  await pane.input({ key: 'type-i1', text: 'I will check the copy tomorrow.' })
+  expect(((await pane.find({ type: 'Client', key: 'reply-i1' }))?.props.props as { value: string }).value).toBe(
+    'I will check the copy tomorrow.',
+  )
+  await pane.key({ key: 'return', in: 'reply-i1' })
   expect(sent).toHaveLength(1)
   expect(sent[0]).toContain('I will check the copy tomorrow.')
   await pane.press({ key: 'fold-details-i1' })
   await pane.press({ key: 'typekey-i1' })
-  expect((await pane.find({ key: 'type-i1' }))?.props.value).toBe('')
+  expect(((await pane.find({ type: 'Client', key: 'reply-i1' }))?.props.props as { value: string }).value).toBe('')
 
   await $.session.end({ reason: 'clear', sessionId: 'session-1', resume: { id: 'session-1' } })
   await $.classic.SessionStart({ source: 'clear', session_id: 'session-2' })
@@ -1061,7 +1191,7 @@ test('task drafts stay separate between rows and are cleared after sending or sw
   await clock.settle()
   await pane.press({ key: 'select-i2' })
   await pane.press({ key: 'typekey-i2' })
-  expect((await pane.find({ key: 'type-i2' }))?.props.value).toBe('')
+  expect(((await pane.find({ type: 'Client', key: 'reply-i2' }))?.props.props as { value: string }).value).toBe('')
 })
 
 test('Claude closes an item or finding that no longer applies, by the id it reads beside the prompt', async ($, on) => {

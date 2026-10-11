@@ -76,11 +76,17 @@ letter next to the answer you want, and it goes to Claude as your message. You
 can also have Claude fix a finding, mark a task done, or dismiss anything you
 don't need.
 
-**Type an answer** and **Type a reply** show a **Full draft** preview as you
-write. It wraps to the panel width instead of shortening long text. The editor
-itself is Claude Code's single-line field; press Enter to send. Unsent drafts
-survive resizing and closing the panel during the same conversation. They are
-cleared when sent or when you switch conversations.
+In the terminal, **Type an answer** and **Type a reply** open one wrapping
+editor. Click inside to type. The field grows with the text, up to twelve
+visible lines, then follows the cursor as you move through longer drafts.
+Press **Enter** to send, or **Shift+Enter** (also Alt+Enter) to add a line.
+Arrow keys, selection with Shift, mouse selection, and Ctrl+A / Ctrl+Z work
+inside the field. Escape releases the keyboard back to the panel.
+
+**Keep draft** closes the editor without sending. Unsent drafts survive
+resizing and closing the panel during the same conversation. They are cleared
+when sent or when you switch conversations. The desktop app retains its native
+input field.
 
 In the panel, `1`, `2`, `3` and `4` switch tabs, `j` and `k` move up and down, and
 an action's letter runs it. You can also click. ctrl+x tab moves between the
