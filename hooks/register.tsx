@@ -1346,6 +1346,7 @@ async function actOnFinding($: EngineInterface, finding: Finding, how: 'address'
 
 async function showTab($: EngineInterface, tab: Tab) {
   if (tab === 'prs') await findPrs($)
+  await update($, TYPING, () => null)
   await update($, TAB, () => tab)
   await $.ui.scroll({ in: PANE, to: 'start' }).catch(() => undefined)
 }
@@ -2576,25 +2577,34 @@ export const register: Register = (on, options) => {
       typeof data.text !== 'string' ||
       data.sessionId !== sessionId ||
       e.element !== `reply-${data.rowId}` ||
-      !['change', 'submit', 'cancel'].includes(String(data.kind)) ||
+      !['open', 'change', 'submit', 'cancel'].includes(String(data.kind)) ||
       data.text.length > MAX_REPLY_LENGTH
     )
       return {}
     const isCurrent = () => at === conversation && data.sessionId === sessionId
-    if (await read($, IS_DEMO)) {
-      if (data.kind === 'submit') await $.ui.toast(SAMPLE_PRESS)
-      return {}
+    // The host gives the Client keyboard focus when its field is clicked.
+    // Opening or focusing the pane here would take that focus away.
+    const { ledger, checks, prViews } = await drawnState($)
+    const tab = await read($, TAB)
+    const selection = await read($, SELECTION)
+    const ids = tabRowIds(ledger, checks, Object.values(prViews.views))[tab]
+    if (!isCurrent() || ids[selectedIndex(ids, selection[tab])] !== data.rowId) return {}
+    if (data.kind === 'open' || data.kind === 'change') {
+      await update($, TYPING, id => (isCurrent() ? (data.rowId as string) : id))
     }
     if ((await read($, TYPING)) !== data.rowId || !isCurrent()) return {}
     await setReplyDraft($, data.rowId, data.text, data.sessionId as string)
     if (!isCurrent()) return {}
-    if (data.kind === 'change') return {}
+    if (data.kind === 'change' || data.kind === 'open') return {}
     if (data.kind === 'cancel') {
       await update($, TYPING, id => (isCurrent() && id === data.rowId ? null : id))
       return {}
     }
+    if (await read($, IS_DEMO)) {
+      await $.ui.toast(SAMPLE_PRESS)
+      return {}
+    }
     if (!data.text.trim()) return {}
-    const { ledger, checks, prViews } = await drawnState($)
     if (!isCurrent()) return {}
     const item = ledger.items.find(i => i.id === data.rowId)
     const finding = ledger.findings.find(f => f.id === data.rowId)
@@ -2606,8 +2616,6 @@ export const register: Register = (on, options) => {
       return null
     })
     if (!claimed || !isCurrent()) return {}
-    const tab = await read($, TAB)
-    if (!isCurrent()) return {}
     const index = tabRowIds(ledger, checks, Object.values(prViews.views))[tab].indexOf(data.rowId)
     if (item) await sendTypedForItem($, item, data.text)
     else await sendTypedForFinding($, finding!, data.text)
@@ -3385,7 +3393,7 @@ export const register: Register = (on, options) => {
       return all.reduce((w, k) => w + k.hotkey.length + 2 + k.label.length, 0) + 2 * Math.max(0, all.length - 1) + dot
     }
     // A typed reply needs a text field, so it is left out where there is none.
-    const pressable = (keys: KeyAction[]) => keys.filter(k => Input || !k.key.startsWith('typekey-'))
+    const pressable = (keys: KeyAction[]) => keys.filter(k => (Input && !Client) || !k.key.startsWith('typekey-'))
     const toggleDetails = (id: string) =>
       void update($, SHOWN_DETAILS, s => (s.includes(id) ? s.filter(x => x !== id) : [...s, id]))
     // Every action that declares `done` records it on its row once the press has
@@ -3620,7 +3628,7 @@ export const register: Register = (on, options) => {
                     ? keyRow(keys, more)
                     : [keyRow(keys), keyRow(more)]}
               </Box>
-              {Input && row.onType && typing === row.id ? (
+              {Input && row.onType && isOpen && (Client || typing === row.id) ? (
                 <Box flexDirection="column" marginTop={blankLine}>
                   {Client ? (
                     <Client
@@ -3631,6 +3639,10 @@ export const register: Register = (on, options) => {
                         sessionId,
                         rowId: row.id,
                         value: replyDrafts.texts[row.id] ?? '',
+                        open: typing === row.id,
+                        label:
+                          [...row.keys(), ...(row.moreKeys?.() ?? [])].find(k => k.key.startsWith('typekey-'))?.label ??
+                          'Type a reply',
                         columns: e.props.bodyColumns - (tree ? 8 : 6),
                         accent: pal.key,
                         muted: pal.muted,
@@ -4336,8 +4348,8 @@ export const register: Register = (on, options) => {
         </Box>
         {footer}
         <Box display="none">
-          {keyBindings([...tabKeys, ...moveKeys])}
-          {keyBindings(rowKeys, '-key')}
+          {typing ? null : keyBindings([...tabKeys, ...moveKeys])}
+          {typing ? null : keyBindings(rowKeys, '-key')}
         </Box>
       </Box>
     )

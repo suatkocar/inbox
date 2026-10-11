@@ -14,6 +14,8 @@ type Props = {
   sessionId: string
   rowId: string
   value: string
+  open: boolean
+  label: string
   columns: number
   accent: string
   muted: string
@@ -26,11 +28,12 @@ type Local = {
   live: Props
   top: number
   column: number | null
-  dragging: boolean
   pending: boolean
   error: string
+  open: boolean
 }
 const MAX_ROWS = 12
+
 const SPECIAL = new Set([
   'up',
   'down',
@@ -49,8 +52,9 @@ const SPECIAL = new Set([
 
 const ReplyEditor: ClientModule<Props, Local> = (props, surface) => {
   const { Box, Text, Button } = surface.elements
-  const width = () => Math.max(2, (surface.columns || props.columns) - 4)
-  const send = (kind: 'change' | 'submit' | 'cancel', state: Local) =>
+  const columns = () => Math.max(6, surface.columns || props.columns)
+  const width = () => columns() - 4
+  const send = (kind: 'open' | 'change' | 'submit' | 'cancel', state: Local) =>
     surface.post({ kind, rowId: state.live.rowId, sessionId: state.live.sessionId, text: state.edit.text })
   const commit = (state: Local, edit: Edit, save = true) => {
     if (edit.text.length > MAX_REPLY_LENGTH) {
@@ -73,7 +77,7 @@ const ReplyEditor: ClientModule<Props, Local> = (props, surface) => {
   }
   const submit = () => {
     const state = surface.state
-    if (!state || state.pending || !state.edit.text.trim()) return
+    if (!state || !state.open || state.pending || !state.edit.text.trim()) return
     surface.setState({ ...state, pending: !state.live.demo })
     send('submit', state)
   }
@@ -85,13 +89,18 @@ const ReplyEditor: ClientModule<Props, Local> = (props, surface) => {
       live: props,
       top: 0,
       column: null,
-      dragging: false,
       pending: false,
       error: '',
+      open: props.open,
     })
     surface.onKey(e => {
-      const state = surface.state
+      let state = surface.state
       if (!state || state.pending) return
+      if (!state.open) {
+        state = { ...state, open: true }
+        surface.setState(state)
+        send('open', state)
+      }
       const { edit } = state
       const key = e.key.toLowerCase()
       if (key === 'return') {
@@ -171,22 +180,9 @@ const ReplyEditor: ClientModule<Props, Local> = (props, surface) => {
       }
       if (!e.ctrl && !e.meta && !SPECIAL.has(key)) commit(state, insertText(edit, e.key === 'space' ? ' ' : e.key))
     })
-    surface.onPointer(e => {
-      const state = surface.state
-      if (!state || state.pending) return
-      if (e.type === 'up') {
-        surface.setState({ ...state, dragging: false })
-        return
-      }
-      if (e.button !== 'left' || (e.type !== 'down' && !(e.type === 'move' && state.dragging))) return
-      const lines = wrapReply(state.edit.text, width())
-      const rowCount = Math.min(MAX_ROWS, Math.max(2, lines.length))
-      if (e.type === 'down' && (e.y < 1 || e.y > rowCount)) return
-      const row = Math.max(0, Math.min(lines.length - 1, state.top + e.y - 1))
-      const cursor = offsetAt(lines[row]!, Math.max(0, e.x - 2))
-      const anchor = e.type === 'down' && !e.shift ? cursor : (state.edit.anchor ?? state.edit.cursor)
-      surface.setState({ ...state, edit: { ...state.edit, cursor, anchor }, column: null, dragging: true })
-    })
+    // Registering a pointer listener enables pixel mouse reports in the host.
+    // Terminals with fractional cell sizes can then misplace clicks throughout
+    // the pane. A keyboard-only Client still receives focus from a native click.
     return <Text dimColor>Opening reply editor…</Text>
   }
   const state = surface.state
@@ -199,11 +195,21 @@ const ReplyEditor: ClientModule<Props, Local> = (props, surface) => {
       redo: [],
       top: 0,
       column: null,
-      dragging: false,
       pending: false,
       error: '',
+      open: props.open,
     })
     return <Text dimColor>Opening reply editor…</Text>
+  }
+  if (state.live.open !== props.open) {
+    state.open = props.open
+    state.pending = false
+  }
+  if (!state.open && props.value !== state.live.value) {
+    state.edit = { text: props.value, cursor: props.value.length, anchor: null }
+    state.history = []
+    state.redo = []
+    state.top = 0
   }
   state.live = props
   const lines = wrapReply(state.edit.text, width())
@@ -215,23 +221,31 @@ const ReplyEditor: ClientModule<Props, Local> = (props, surface) => {
   const selectedEnd = Math.max(state.edit.cursor, state.edit.anchor ?? state.edit.cursor)
   return (
     <Box flexDirection="column" width="100%">
-      <Box flexDirection="column" borderStyle="round" borderColor={props.accent} paddingX={1}>
+      <Box
+        key="reply-field"
+        flexDirection="column"
+        borderStyle="round"
+        borderColor={props.muted}
+        hover={{ borderColor: props.accent }}
+        paddingX={1}
+      >
         {Array.from({ length: count }, (_, i) => {
           const row = state.top + i
           const line = lines[row]
+          if (!state.edit.text && i === 0 && !state.open) return <Text color={props.muted}>{props.label}…</Text>
           if (!line) return <Text> </Text>
           // Group runs so long lines stay well within the Client's tree budget.
           const runs: { text: string; inverse: boolean }[] = []
           for (const cell of line.cells) {
             const inverse =
               (cell.start >= selectedStart && cell.start < selectedEnd) ||
-              (row === position.row && cell.start === state.edit.cursor)
+              (state.open && row === position.row && cell.start === state.edit.cursor)
             const previous = runs.at(-1)
             if (previous?.inverse === inverse) previous.text += cell.text
             else runs.push({ text: cell.text, inverse })
           }
           const text = runs.map(run => <Text inverse={run.inverse}>{run.text}</Text>)
-          const atEnd = row === position.row && state.edit.cursor === line.end
+          const atEnd = state.open && row === position.row && state.edit.cursor === line.end
           return (
             <Text wrap="truncate-end">
               {text}
@@ -241,12 +255,31 @@ const ReplyEditor: ClientModule<Props, Local> = (props, surface) => {
           )
         })}
       </Box>
-      <Box flexDirection="row" justifyContent="space-between">
-        <Button key="save-reply" label="Keep draft" onPress={() => send('cancel', surface.state!)} />
-        <Button key="send-reply" label={state.pending ? 'Sending…' : 'Send'} onPress={submit} />
-      </Box>
+      {state.open ? (
+        <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={2}>
+          <Button
+            key="reply-keep"
+            label="Keep draft"
+            onPress={() => {
+              const current = surface.state
+              if (!current || current.pending) return
+              surface.setState({ ...current, open: false })
+              send('cancel', current)
+            }}
+          />
+          {state.edit.text.trim() && !state.pending ? (
+            <Button key="reply-send" label="Send" onPress={submit} />
+          ) : (
+            <Text color={props.muted}>{state.pending ? 'Sending…' : 'Send'}</Text>
+          )}
+        </Box>
+      ) : null}
       <Text color={props.muted} wrap="wrap">
-        {state.edit.text ? 'Enter sends · Shift+Enter adds a line' : 'Click inside to write · Enter sends'}
+        {state.open
+          ? 'Enter sends · Shift+Enter adds a line · Arrow keys move the cursor'
+          : state.edit.text
+            ? 'Draft saved · Click inside to continue.'
+            : 'Click inside to write · Enter sends'}
       </Text>
       {lines.length > count ? (
         <Text color={props.muted}>
